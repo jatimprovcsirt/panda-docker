@@ -1,0 +1,8 @@
+/panda-docker
+/panda-docker.exe
+*.test
+*.out
+coverage.txt
+.env
+.env.*
+!.env.example
