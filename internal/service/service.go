@@ -125,7 +125,7 @@ func (s *Service) Encrypt(plaintext, kid string) (*EncryptResult, error) {
 	return &EncryptResult{Envelope: encoded, KID: env.Kid, Version: env.V}, nil
 }
 
-// Decrypt returns the masked value.
+// Decrypt returns the masked value and the key it was encrypted under.
 //
 // This is the default read path, and the reason it is the default is that a
 // masked value can go straight into an API response or a log line without the
@@ -134,14 +134,14 @@ func (s *Service) Encrypt(plaintext, kid string) (*EncryptResult, error) {
 // Note what the SDK does underneath: it decrypts fully and then masks, which
 // emits a `decrypt_raw` event on the SDK's own audit logger. That is why this
 // service writes its own record separately — see AuditRecord.
-func (s *Service) Decrypt(actor Actor, envelope string) (string, error) {
+func (s *Service) Decrypt(actor Actor, envelope string) (*DecryptResult, error) {
 	env, err := crypto.ParseEnvelope(envelope)
 	if err != nil {
 		s.audit.Record(AuditRecord{
 			Operation: "decrypt", Outcome: "failure", Actor: actor,
 			ErrorCode: apierr.CodeOf(apierr.FromSDK(err)),
 		})
-		return "", apierr.FromSDK(err)
+		return nil, apierr.FromSDK(err)
 	}
 
 	plaintext, err := s.cipher.Decrypt(env)
@@ -151,13 +151,24 @@ func (s *Service) Decrypt(actor Actor, envelope string) (string, error) {
 			Operation: "decrypt", Outcome: "failure", Actor: actor,
 			KID: env.Kid, ErrorCode: apiErr.Code,
 		})
-		return "", apiErr
+		return nil, apiErr
 	}
 
 	s.audit.Record(AuditRecord{
 		Operation: "decrypt", Outcome: "success", Actor: actor, KID: env.Kid,
 	})
-	return string(plaintext), nil
+	return &DecryptResult{Value: string(plaintext), KID: env.Kid}, nil
+}
+
+// DecryptResult carries the masked value and the key that produced it.
+//
+// The KID is returned rather than dropped because a caller investigating a
+// rotation wants to know which key a value was encrypted under, and the
+// alternative — re-parsing the envelope — means the caller has to know the
+// wire format to ask a question the service already answered.
+type DecryptResult struct {
+	Value string
+	KID   string
 }
 
 // DecryptRawResult carries the plaintext and the audit identifier.

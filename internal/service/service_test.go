@@ -80,8 +80,12 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
-	if masked != "32************01" {
-		t.Errorf("masked = %q, want %q", masked, "32************01")
+	if masked.Value != "32************01" {
+		t.Errorf("masked = %q, want %q", masked.Value, "32************01")
+	}
+	// The KID used to be advertised in the response and never populated.
+	if masked.KID != kid {
+		t.Errorf("kid = %q, want %q", masked.KID, kid)
 	}
 
 	raw, err := svc.DecryptRaw(Actor{}, result.Envelope)
