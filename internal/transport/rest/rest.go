@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jatimprovcsirt/panda-docker/internal/apierr"
+	"github.com/jatimprovcsirt/panda-docker/internal/auth"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 )
 
@@ -24,6 +25,7 @@ type Server struct {
 	svc             *service.Service
 	log             *slog.Logger
 	maxRequestBytes int64
+	auth            *auth.Authenticator
 }
 
 // Options configures a Server.
@@ -31,6 +33,10 @@ type Options struct {
 	Service         *service.Service
 	Logger          *slog.Logger
 	MaxRequestBytes int64
+	// Authenticator is required. A nil one is refused rather than replaced by
+	// a permissive default — the failure mode of "auth not wired" must be a
+	// service that will not start, not one that serves everyone.
+	Authenticator *auth.Authenticator
 }
 
 func New(opts Options) (*Server, error) {
@@ -43,18 +49,29 @@ func New(opts Options) (*Server, error) {
 	if opts.MaxRequestBytes <= 0 {
 		opts.MaxRequestBytes = 1 << 20
 	}
-	return &Server{svc: opts.Service, log: opts.Logger, maxRequestBytes: opts.MaxRequestBytes}, nil
+	if opts.Authenticator == nil {
+		return nil, errors.New("rest: an authenticator is required")
+	}
+	return &Server{
+		svc:             opts.Service,
+		log:             opts.Logger,
+		maxRequestBytes: opts.MaxRequestBytes,
+		auth:            opts.Authenticator,
+	}, nil
 }
 
 // Handler returns the routed HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /v1/encrypt", s.handleEncrypt)
-	mux.HandleFunc("POST /v1/decrypt", s.handleDecrypt)
-	mux.HandleFunc("POST /v1/decrypt/raw", s.handleDecryptRaw)
-	mux.HandleFunc("POST /v1/mask", s.handleMask)
-	mux.HandleFunc("POST /v1/blind-index", s.handleBlindIndex)
+	// Each route names the scope it requires. A new endpoint cannot be
+	// registered without deciding that, which is the point of passing it here
+	// rather than checking inside the handler.
+	mux.Handle("POST /v1/encrypt", s.authorize("encrypt", s.handleEncrypt))
+	mux.Handle("POST /v1/decrypt", s.authorize("decrypt", s.handleDecrypt))
+	mux.Handle("POST /v1/decrypt/raw", s.authorize("decrypt_raw", s.handleDecryptRaw))
+	mux.Handle("POST /v1/mask", s.authorize("mask", s.handleMask))
+	mux.Handle("POST /v1/blind-index", s.authorize("blind_index", s.handleBlindIndex))
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 
 	// Anything else is a 404 in the same error shape as everything else. A
@@ -62,7 +79,7 @@ func (s *Server) Handler() http.Handler {
 	// parse errors uniformly.
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return s.recoverPanics(s.limitBody(mux))
+	return s.recoverPanics(s.limitBody(s.authenticate(mux)))
 }
 
 // --- middleware ------------------------------------------------------------
@@ -151,18 +168,6 @@ func (s *Server) decode(w http.ResponseWriter, r *http.Request, into any) error 
 	return nil
 }
 
-// actor builds the audit identity from what the transport can see.
-func (s *Server) actor(r *http.Request) service.Actor {
-	actor := service.Actor{
-		SourceIP:  clientIP(r),
-		RequestID: r.Header.Get("X-Request-Id"),
-	}
-	if actor.RequestID == "" {
-		actor.RequestID = "unset"
-	}
-	return actor
-}
-
 // clientIP prefers the direct peer address.
 //
 // X-Forwarded-For is deliberately not trusted: it is caller-supplied, and an
@@ -226,7 +231,7 @@ func (s *Server) handleDecrypt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.svc.Decrypt(s.actor(r), req.Envelope)
+	result, err := s.svc.Decrypt(s.actorFrom(r), req.Envelope)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -253,7 +258,7 @@ func (s *Server) handleDecryptRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.svc.DecryptRaw(s.actor(r), req.Envelope)
+	result, err := s.svc.DecryptRaw(s.actorFrom(r), req.Envelope)
 	if err != nil {
 		s.writeError(w, err)
 		return

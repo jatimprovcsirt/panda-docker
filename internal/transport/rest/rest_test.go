@@ -13,6 +13,7 @@ import (
 	"github.com/jatimprovcsirt/panda-go/crypto"
 
 	"github.com/jatimprovcsirt/panda-docker/internal/apierr"
+	"github.com/jatimprovcsirt/panda-docker/internal/auth"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 )
 
@@ -36,10 +37,16 @@ func newTestServer(t *testing.T, maxBytes int64) *Server {
 		t.Fatalf("service.New: %v", err)
 	}
 
+	a, err := auth.NewAuthenticator(nil, auth.ModeNone)
+	if err != nil {
+		t.Fatalf("auth.NewAuthenticator: %v", err)
+	}
+
 	srv, err := New(Options{
 		Service:         svc,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxRequestBytes: maxBytes,
+		Authenticator:   a,
 	})
 	if err != nil {
 		t.Fatalf("rest.New: %v", err)

@@ -6,3 +6,4 @@ coverage.txt
 .env
 .env.*
 !.env.example
+.tmpkeys/

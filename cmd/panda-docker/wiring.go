@@ -13,7 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"crypto/tls"
+
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -21,8 +24,10 @@ import (
 	"github.com/jatimprovcsirt/panda-go/crypto"
 
 	pandav1 "github.com/jatimprovcsirt/panda-docker/gen/panda/v1"
+	"github.com/jatimprovcsirt/panda-docker/internal/auth"
 	"github.com/jatimprovcsirt/panda-docker/internal/config"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
+	"github.com/jatimprovcsirt/panda-docker/internal/tlscfg"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/grpctransport"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/rest"
 )
@@ -71,19 +76,26 @@ type slogLogger = slog.Logger
 // The inactive protocol is not built at all. It would be easy to construct
 // both and bind one, but then a future change that binds the wrong one is a
 // silent exposure rather than a compile-time absence.
-func buildAPI(cfg *config.Config, svc *service.Service, log *slog.Logger) (apiServer, string, error) {
+func buildAPI(cfg *config.Config, svc *service.Service, authenticator *auth.Authenticator, log *slog.Logger) (apiServer, string, error) {
 	switch cfg.Protocol {
 	case config.ProtocolREST:
 		srv, err := rest.New(rest.Options{
 			Service:         svc,
 			Logger:          log,
 			MaxRequestBytes: cfg.MaxRequestBytes,
+			Authenticator:   authenticator,
 		})
 		if err != nil {
 			return nil, "", err
 		}
+		tlsConf, err := buildTLS(cfg)
+		if err != nil {
+			return nil, "", err
+		}
+
 		return &http.Server{
 			Handler:           srv.Handler(),
+			TLSConfig:         tlsConf,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       cfg.RequestTimeout,
 			WriteTimeout:      cfg.RequestTimeout,
@@ -96,9 +108,16 @@ func buildAPI(cfg *config.Config, svc *service.Service, log *slog.Logger) (apiSe
 			return nil, "", err
 		}
 
-		grpcSrv := grpc.NewServer(
+		serverOpts := []grpc.ServerOption{
 			grpc.ChainUnaryInterceptor(grpctransport.RecoverInterceptor(log)),
-		)
+		}
+		if creds, err := grpcCredentials(cfg); err != nil {
+			return nil, "", err
+		} else if creds != nil {
+			serverOpts = append(serverOpts, grpc.Creds(creds))
+		}
+
+		grpcSrv := grpc.NewServer(serverOpts...)
 		pandav1.RegisterPandaServiceServer(grpcSrv, handler)
 
 		// The standard health service, so Kubernetes can use a native gRPC
@@ -288,4 +307,56 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return v
+}
+
+// buildTLS returns the TLS configuration, or nil when TLS is off.
+func buildTLS(cfg *config.Config) (*tls.Config, error) {
+	if !cfg.TLSEnabled {
+		return nil, nil
+	}
+	return tlscfg.New(tlscfg.Options{
+		CertFile:          cfg.TLSCertFile,
+		KeyFile:           cfg.TLSKeyFile,
+		ClientCAFile:      cfg.TLSClientCAFile,
+		RequireClientCert: cfg.AuthMode == config.AuthMTLSAndAPIKey || cfg.AuthMode == config.AuthMTLS,
+	})
+}
+
+// grpcCredentials wraps the same TLS material for the gRPC server.
+func grpcCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
+	conf, err := buildTLS(cfg)
+	if err != nil || conf == nil {
+		return nil, err
+	}
+	return credentials.NewTLS(conf), nil
+}
+
+// buildAuthenticator constructs the auth layer for the configured mode.
+//
+// A mode that needs a store refuses to start without one. The alternative —
+// falling back to a permissive default — is the failure this whole phase
+// exists to prevent: a service that looks protected and is not.
+func buildAuthenticator(cfg *config.Config) (*auth.Authenticator, error) {
+	mode := auth.Mode(cfg.AuthMode)
+
+	if mode == auth.ModeNone {
+		return auth.NewAuthenticator(nil, mode)
+	}
+
+	path := os.Getenv("PANDA_API_KEY_STORE")
+	if path == "" && mode == auth.ModeMTLS {
+		// Certificate-only mode carries no key to look up scopes in.
+		return auth.NewAuthenticator(nil, mode)
+	}
+	if path == "" {
+		return nil, errors.New(
+			"PANDA_API_KEY_STORE is required in this auth mode; point it at a JSON " +
+				"key store, or use PANDA_AUTH_MODE=mtls to rely on certificates alone")
+	}
+
+	store, err := auth.LoadFileStore(path)
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewAuthenticator(store, mode)
 }

@@ -105,22 +105,26 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	api, apiAddr, err := buildAPI(cfg, svc, log)
+	authenticator, err := buildAuthenticator(cfg)
+	if err != nil {
+		log.Error("could not build the authentication layer", "error", err)
+		return exitRefused
+	}
+	log.Info("authentication configured", "mode", string(cfg.AuthMode))
+
+	api, apiAddr, err := buildAPI(cfg, svc, authenticator, log)
 	if err != nil {
 		log.Error("could not build the API", "error", err)
 		return exitRefused
 	}
 
-	// TLS is not wired yet — it belongs to Phase 3, and the certificates the
-	// config validates are not yet loaded. Say so loudly rather than letting
-	// the config imply a protection that is not there.
-	//
-	// This warning exists because the failure is silent otherwise: an operator
-	// who sets PANDA_TLS_ENABLED=true and sees no complaint would reasonably
-	// conclude the listener is encrypted. It is not.
-	if cfg.TLSEnabled {
-		log.Warn("TLS is configured but not yet implemented; the API listener is plain HTTP. " +
-			"Do not expose this instance outside an isolated network until the hardening phase lands.")
+	// The listener is wrapped in TLS by the server type itself, so a service
+	// configured for TLS cannot come up without it: buildTLS refuses rather
+	// than returning a nil config that would serve plaintext.
+	if !cfg.TLSEnabled {
+		log.Warn("TLS is disabled; the API listener is plain HTTP. " +
+			"This is acceptable only on an isolated network, and is refused entirely in production " +
+			"unless the auth mode acknowledges it.")
 	}
 
 	// net.Listen is called here rather than letting the server bind, so a

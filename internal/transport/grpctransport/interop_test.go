@@ -21,6 +21,7 @@ import (
 
 	pandav1 "github.com/jatimprovcsirt/panda-docker/gen/panda/v1"
 	"github.com/jatimprovcsirt/panda-docker/internal/apierr"
+	"github.com/jatimprovcsirt/panda-docker/internal/auth"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/rest"
 )
@@ -81,7 +82,11 @@ func newBothTransports(t *testing.T) *bothTransports {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	// REST over the same service instance.
-	restSrv, err := rest.New(rest.Options{Service: svc, Logger: quiet})
+	permissive, err := auth.NewAuthenticator(nil, auth.ModeNone)
+	if err != nil {
+		t.Fatalf("auth.NewAuthenticator: %v", err)
+	}
+	restSrv, err := rest.New(rest.Options{Service: svc, Logger: quiet, Authenticator: permissive})
 	if err != nil {
 		t.Fatalf("rest.New: %v", err)
 	}
