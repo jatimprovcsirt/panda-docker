@@ -17,13 +17,15 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Scoped to this job rather than the whole workflow, so the default token
-    # stays read-only. `contents: write` is what the release step at the bottom
-    # needs to create the GitHub Release — without it that step fails with
-    # "Resource not accessible by integration" after the image is already in
-    # Harbor, leaving a published image with no release record behind it.
+    # contents: write     — the last step creates a GitHub Release.
+    # id-token: write     — attestations are signed with this workflow's OIDC
+    #                       identity, which is what makes them worth anything.
+    # attestations: write — stores them where `gh attestation verify` finds them.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +42,31 @@ jobs:
           echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           echo "COMMIT=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
 
+      # --- reaching Harbor ---------------------------------------------------
+      #
+      # Harbor sits behind Cloudflare, and a custom rule there rejects
+      # connections from outside Indonesia. A GitHub-hosted runner lives in
+      # Azure, so it is refused at the edge before Harbor sees the request —
+      # verified with no credentials at all, so it was never an auth problem.
+      #
+      # A Cloudflare client certificate is the way through. Ownership matters
+      # as much as the certificate: login and push go through the daemon,
+      # which runs as root, but `docker manifest` talks to the registry from
+      # the CLI process. A root-owned mode-600 key makes that fail with EACCES,
+      # which reads like a certificate problem and is not one.
+      - name: Install the Cloudflare client certificate
+        env:
+          CLIENT_CERT: ${{ secrets.CLOUDFLARE_CLIENT_CERT }}
+          CLIENT_KEY: ${{ secrets.CLOUDFLARE_CLIENT_KEY }}
+        run: |
+          set -euo pipefail
+          dir="/etc/docker/certs.d/${REGISTRY}"
+          sudo mkdir -p "$dir"
+          printf '%s\n' "$CLIENT_CERT" | tr -d '\r' | sudo tee "$dir/client.cert" >/dev/null
+          printf '%s\n' "$CLIENT_KEY"  | tr -d '\r' | sudo tee "$dir/client.key"  >/dev/null
+          sudo chown "$(id -u):$(id -g)" "$dir/client.key"
+          sudo chmod 600 "$dir/client.key"
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -50,30 +77,127 @@ jobs:
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
-      # Both architectures: OPD infrastructure in Jawa Timur is predominantly
-      # x86_64, but arm64 costs little and covers ARM-based on-prem servers and
-      # developer machines.
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      # --- build and publish -------------------------------------------------
+      #
+      # One architecture at a time, loaded into the daemon, pushed from there,
+      # then assembled into a manifest list. This is not the obvious way to
+      # publish a multi-platform image — `buildx build --push` does the whole
+      # thing in one step — but it is the only way that works here.
+      #
+      # BuildKit runs in its own container with its own filesystem. It does
+      # not read the client certificate, and its pushes die at the Cloudflare
+      # edge with an HTML error page that looks like anything but a TLS
+      # problem. Confirmed by pushing an actual image, not inferred.
+      - name: Build and push each architecture
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker buildx build \
+              --platform "linux/${arch}" \
+              --build-arg "VERSION=${VERSION}" \
+              --build-arg "COMMIT=${COMMIT}" \
+              -t "${IMAGE}:${VERSION}-${arch}" \
+              --load .
+            docker push "${IMAGE}:${VERSION}-${arch}"
+          done
+
+      - name: Assemble the manifest list
+        run: |
+          set -euo pipefail
+          version_digest=""
+          for tag in "${VERSION}" "${COMMIT}"; do
+            if ! docker manifest create "${IMAGE}:${tag}" \
+                   "${IMAGE}:${VERSION}-amd64" \
+                   "${IMAGE}:${VERSION}-arm64" 2>/tmp/manifest-create.err; then
+              # The tag can already hold a manifest list — on a re-run, or
+              # because something wrote to it before this workflow existed.
+              # --amend updates it in place rather than refusing, which is
+              # what a release is supposed to do to its own tag.
+              cat /tmp/manifest-create.err
+              echo "retrying ${tag} with --amend"
+              docker manifest create --amend "${IMAGE}:${tag}" \
+                "${IMAGE}:${VERSION}-amd64" \
+                "${IMAGE}:${VERSION}-arm64"
+            fi
+
+            # Read the digest from either stream: some Docker versions print
+            # it to stderr, and an empty value here would silently attest the
+            # wrong thing rather than fail.
+            digest="$(docker manifest push "${IMAGE}:${tag}" 2>&1 \
+              | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)"
+            if [ -z "$digest" ]; then
+              echo "could not read the digest for ${tag}"
+              exit 1
+            fi
+            echo "${tag} -> ${digest}"
+
+            if [ "$tag" = "${VERSION}" ]; then
+              version_digest="$digest"
+            fi
+          done
+
+          # Everything downstream binds to this one: the attestations are
+          # signed over it, and it is what a deployment should pin.
+          echo "DIGEST=${version_digest}" >> "$GITHUB_ENV"
+
+      # --- evidence ----------------------------------------------------------
+      #
+      # Provenance and the SBOM cannot be attached to the image as OCI
+      # artifacts, because attaching them means BuildKit pushing to Harbor,
+      # which is the one thing that does not work. They are stored in
+      # GitHub's attestation store instead and bound to the image digest.
+      #
+      # The verification is just as strong — it is the signature and the
+      # digest binding that matter, not where the file sits. What changes is
+      # how a consumer finds it: `gh attestation verify`, rather than pulling
+      # an artifact out of the registry.
+      - name: Generate the SBOM
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+          sbom="panda-docker-${VERSION}.spdx.json"
+
+          # Scan the image in the local daemon. Syft would otherwise reach for
+          # the registry itself and be refused at the Cloudflare edge, so the
+          # explicit docker: source is a requirement here, not a preference.
+          if ! syft "docker:${IMAGE}:${VERSION}-amd64" -o "spdx-json=${sbom}" -q; then
+            echo "the docker: source was unavailable; scanning a saved archive instead"
+            docker save "${IMAGE}:${VERSION}-amd64" -o /tmp/sbom-image.tar
+            syft "docker-archive:/tmp/sbom-image.tar" -o "spdx-json=${sbom}" -q
+          fi
+
+          echo "SBOM written to ${sbom} ($(wc -c < "${sbom}") bytes)"
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-          tags: |
-            ${{ env.IMAGE }}:${{ env.VERSION }}
-            ${{ env.IMAGE }}:${{ env.COMMIT }}
-          # Provenance and SBOM travel with the image, so a consumer can check
-          # what produced it rather than trusting the tag.
-          provenance: true
-          sbom: true
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.DIGEST }}
+          # Not pushed to the registry: these actions use their own registry
+          # client, which meets the same Cloudflare rule BuildKit met.
+          push-to-registry: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.DIGEST }}
+          sbom-path: panda-docker-${{ env.VERSION }}.spdx.json
+          push-to-registry: false
 
       - name: Scan the published image
         uses: aquasecurity/trivy-action@master
+        env:
+          # The same reason as the SBOM: let Trivy read the local daemon
+          # rather than the registry, which it cannot reach.
+          TRIVY_IMAGE_SRC: docker
         with:
-          image-ref: ${{ env.IMAGE }}:${{ env.VERSION }}
+          # The per-architecture tag, not the manifest list: a manifest list
+          # assembled by `docker manifest` lives in the registry rather than
+          # in the local daemon, so there is no local image under that tag.
+          image-ref: ${{ env.IMAGE }}:${{ env.VERSION }}-amd64
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
@@ -82,33 +206,29 @@ jobs:
           # and a permanently red gate is one people learn to bypass.
           ignore-unfixed: true
 
-      # The offline path: sites with no route to Harbor load the image from a
-      # tarball on removable media.
+      # --- the offline path --------------------------------------------------
       #
-      # One tarball per architecture, not one tarball. A `docker pull` with no
-      # --platform resolves to the runner's own architecture — amd64 on GitHub
-      # runners — so a single tarball would ship amd64 while the registry holds
-      # both, and the site opening the tarball on an ARM box would get
-      # `exec format error` with nothing in the filename to explain why. The
-      # site that most needs an offline tarball is also the one most likely to
-      # be running something other than x86_64.
+      # Sites with no route to Harbor load the image from a tarball on
+      # removable media. Saved from the local daemon rather than pulled back
+      # from the registry: it is the same bytes, and it does not depend on
+      # the network that this whole workflow is working around.
+      #
+      # One tarball per architecture. A pull with no --platform resolves to
+      # the runner's architecture, and the site that most needs an offline
+      # tarball is the one most likely to be running something else.
       - name: Produce offline tarballs
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
             tar="panda-docker-${VERSION}-linux-${arch}.tar"
-
-            docker pull --platform "linux/${arch}" "${IMAGE}:${VERSION}"
-            docker save "${IMAGE}:${VERSION}" -o "${tar}"
+            docker save "${IMAGE}:${VERSION}-${arch}" -o "${tar}"
             sha256sum "${tar}" > "${tar}.sha256"
 
-            # Verify the tarball holds the architecture its filename claims,
-            # rather than trusting that the flags above did what they say. A
-            # mislabelled tarball is worse than a missing one: it fails at the
-            # offline site, days later, with no route back to a registry to
-            # diagnose it against.
-            docker load -i "${tar}" > /dev/null 2>&1
-            got="$(docker inspect --format '{{.Architecture}}' "${IMAGE}:${VERSION}")"
+            # Confirm the tarball holds what its filename claims. This is the
+            # assertion that catches a mislabelled tarball, which is worse
+            # than a missing one: it fails at the offline site, days later,
+            # with no route back to a registry to diagnose it against.
+            got="$(docker inspect --format '{{.Architecture}}' "${IMAGE}:${VERSION}-${arch}")"
             if [ "${got}" != "${arch}" ]; then
               echo "FAIL: ${tar} holds ${got}, expected ${arch}"
               exit 1
@@ -116,8 +236,31 @@ jobs:
             echo "ok: ${tar} (${arch})"
           done
 
+      - name: What was published
+        run: |
+          {
+            echo "## PANDA Docker ${VERSION}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE}:${VERSION}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Architectures | linux/amd64, linux/arm64 |"
+            echo
+            echo "Pin deployments to the **digest**, not the tag. A tag can be"
+            echo "moved to a different image without leaving a trace; a digest"
+            echo "cannot."
+            echo
+            echo "Verify that this image was built by this repository:"
+            echo
+            echo '```'
+            echo "gh attestation verify oci://${IMAGE}:${VERSION} --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             panda-docker-*.tar
             panda-docker-*.tar.sha256
+            panda-docker-*.spdx.json
