@@ -2,15 +2,18 @@ name: Probe registry reachability
 
 # TEMPORARY DIAGNOSTIC — delete once the question below is answered.
 #
-# The release workflow's Harbor login failed with 403 Forbidden. From an
-# Indonesian network the same registry returns 200 for good credentials and
-# 401 for bad ones, so a 403 is not something Harbor's own auth logic
-# produces. Harbor sits behind Cloudflare, which raises the possibility that
-# the runner is refused before Harbor sees the request at all.
+# Harbor sits behind Cloudflare, and a custom rule there rejects connections
+# from outside Indonesia. A GitHub-hosted runner (Azure, US) is refused with
+# 403 before Harbor sees the request at all — verified with no credentials
+# involved, so it was never an auth problem.
 #
-# This asks that question with no credentials involved. The answer is
-# published as a commit status, because job logs need repository admin to
-# read and the whole point is to find out what the runner sees.
+# The chosen remedy is mutual TLS: a Cloudflare client certificate that a
+# rule can key off, instead of allowlisting 7,036 shared Azure ranges that
+# any GitHub account can obtain.
+#
+# This asks whether that actually works before the release workflow is
+# changed to depend on it. The answer is published as a commit status,
+# because job logs need repository admin to read.
 #
 # Path-filtered to itself so it does not run on unrelated pushes.
 
@@ -28,37 +31,80 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Ask Harbor, anonymously, and publish what comes back
+      - name: Materialise the client certificate
+        # CRLF would make OpenSSL reject the PEM with a parse error that
+        # reads like a wrong certificate rather than a stray carriage return.
+        env:
+          CLIENT_CERT: ${{ secrets.CLOUDFLARE_CLIENT_CERT }}
+          CLIENT_KEY: ${{ secrets.CLOUDFLARE_CLIENT_KEY }}
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/cf
+
+          if [ -z "${CLIENT_CERT:-}" ] || [ -z "${CLIENT_KEY:-}" ]; then
+            echo "one or both secrets are empty"
+            exit 0
+          fi
+
+          printf '%s\n' "$CLIENT_CERT" | tr -d '\r' > /tmp/cf/client.crt
+          printf '%s\n' "$CLIENT_KEY"  | tr -d '\r' > /tmp/cf/client.key
+          chmod 600 /tmp/cf/client.key
+
+          echo "cert bytes: $(wc -c < /tmp/cf/client.crt), key bytes: $(wc -c < /tmp/cf/client.key)"
+          echo "cert header: $(head -1 /tmp/cf/client.crt)"
+          echo "key header:  $(head -1 /tmp/cf/client.key)"
+
+      - name: Certificate metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ ! -s /tmp/cf/client.crt ]; then echo "no cert"; exit 0; fi
+
+          subject=$(openssl x509 -in /tmp/cf/client.crt -noout -subject 2>&1 | sed 's/^subject=//' | tr -d '\r')
+          notafter=$(openssl x509 -in /tmp/cf/client.crt -noout -enddate 2>&1 | sed 's/^notAfter=//')
+          match=$(openssl x509 -in /tmp/cf/client.crt -noout -pubkey 2>/dev/null | openssl md5 | awk '{print $2}')
+          keymatch=$(openssl pkey -in /tmp/cf/client.key -pubout 2>/dev/null | openssl md5 | awk '{print $2}')
+
+          pair="MISMATCH"
+          [ -n "$match" ] && [ "$match" = "$keymatch" ] && pair="ok"
+
+          echo "subject : $subject"
+          echo "expires : $notafter"
+          echo "keypair : $pair"
+
+          desc="subj=${subject:0:45} exp=${notafter} pair=${pair}"
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cf-cert",description:process.argv[1].slice(0,140)}))' "$desc")"
+
+      - name: Does the certificate change the answer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
 
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            https://harbor.jatimprov.go.id/v2/)
-          ip=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)
-          server=$(curl -s -D - -o /dev/null https://harbor.jatimprov.go.id/v2/ \
-            | grep -i '^server:' | tr -d '\r' | head -1)
+          plain=$(curl -s -o /dev/null -w '%{http_code}' https://harbor.jatimprov.go.id/v2/)
 
-          desc="v2=${code} ip=${ip} ${server}"
-          echo "$desc"
+          certv2=$(curl -s -o /dev/null -w '%{http_code}' \
+            --cert /tmp/cf/client.crt --key /tmp/cf/client.key \
+            https://harbor.jatimprov.go.id/v2/ 2>/tmp/cf/err) || true
+          certerr=$(head -c 60 /tmp/cf/err | tr '\n' ' ')
 
+          # The token endpoint is the half that matters for `docker login`:
+          # Docker talks to it separately from the registry, and support for
+          # client certificates there is the assumption being tested.
+          certtok=$(curl -s -o /dev/null -w '%{http_code}' \
+            --cert /tmp/cf/client.crt --key /tmp/cf/client.key \
+            "https://harbor.jatimprov.go.id/service/token?service=harbor-registry&scope=repository:panda/panda-docker:pull,push" 2>/dev/null) || true
+
+          echo "plain=${plain} certv2=${certv2} certtoken=${certtok} err=${certerr}"
+
+          desc="plain=${plain} certv2=${certv2} certtoken=${certtok} ${certerr}"
           curl -s -o /dev/null -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"harbor-probe",description:process.argv[1].slice(0,140)}))' "$desc")"
-
-      - name: Also record what the token endpoint says
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://harbor.jatimprov.go.id/service/token?service=harbor-registry&scope=repository:panda/panda-docker:pull")
-          echo "token endpoint: ${code}"
-
-          curl -s -o /dev/null -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"harbor-probe-token",description:("token-endpoint="+process.argv[1]).slice(0,140)}))' "$code")"
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cf-mtls",description:process.argv[1].slice(0,140)}))' "$desc")"
