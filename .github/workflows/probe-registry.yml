@@ -66,6 +66,12 @@ jobs:
           sudo mkdir -p "/etc/docker/certs.d/${HARBOR}"
           sudo cp /tmp/cf/client.crt "/etc/docker/certs.d/${HARBOR}/client.cert"
           sudo cp /tmp/cf/client.key "/etc/docker/certs.d/${HARBOR}/client.key"
+          # Ownership matters here, and getting it wrong produced a failure
+          # that read like a certificate problem. The daemon runs as root and
+          # reads the key regardless, which is why login and push are
+          # unaffected. `docker manifest` talks to the registry from the CLI
+          # process instead, so a root-owned mode-600 key gives it EACCES.
+          sudo chown "$(id -u):$(id -g)" "/etc/docker/certs.d/${HARBOR}/client.key"
           sudo chmod 600 "/etc/docker/certs.d/${HARBOR}/client.key"
 
           say "cert bytes=$(wc -c < /tmp/cf/client.crt) key bytes=$(wc -c < /tmp/cf/client.key) installed=[$(ls /etc/docker/certs.d/${HARBOR} 2>/dev/null | tr '\n' ' ')]"
