@@ -1,6 +1,6 @@
 cert bytes=1476 key bytes=1708 installed=[client.cert client.key ]
 login exit=0 :: Login Succeeded
-arch=amd64 build=0 push=0 :: 629c5b8d1832: Pushed amd64: digest: sha256:76834cf4692505e5a2cd9e90e12c7b75a738f86415d9fa2ba1ceda76ff4cf1aa si
-arch=arm64 build=0 push=0 :: 629c5b8d1832: Layer already exists arm64: digest: sha256:c0a37cfbbc81813f06c0e0af79ee941f8b9fe177568834c61390c
-manifest create=1 push=1 :: open /etc/docker/certs.d/harbor.jatimprov.go.id/client.key: permission denied No such manifest: harbor.jatimpr
+arch=amd64 build=0 push=0 :: d166a642c1cc: Pushed amd64: digest: sha256:d180c8db6adb8aa07acaa9fdafa8d1a2170eab5107f5ce66676a0694ca8563b8 si
+arch=arm64 build=0 push=0 :: d166a642c1cc: Layer already exists arm64: digest: sha256:fbd721d4994424de995ca53f57df40e0840eb9e28ef10a96680fd
+manifest create=0 push=0 :: Created manifest list harbor.jatimprov.go.id/panda/probe-delete-me:multi sha256:4da2f051d3a8626df8679fc2ad2466
 cleanup http=200 :: 
