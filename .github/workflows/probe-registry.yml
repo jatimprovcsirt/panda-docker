@@ -6,11 +6,11 @@ name: Probe registry reachability
 # Indonesian network the same registry returns 200 for good credentials and
 # 401 for bad ones, so a 403 is not something Harbor's own auth logic
 # produces. Harbor sits behind Cloudflare, which raises the possibility that
-# the runner is being refused before Harbor sees the request at all.
+# the runner is refused before Harbor sees the request at all.
 #
-# This asks one question, with no credentials involved: does an anonymous
-# request from a GitHub-hosted runner get the 401 that Harbor would send, or
-# a 403 from something in front of it?
+# This asks that question with no credentials involved. The answer is
+# published as a commit status, because job logs need repository admin to
+# read and the whole point is to find out what the runner sees.
 #
 # Path-filtered to itself so it does not run on unrelated pushes.
 
@@ -22,34 +22,43 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Where the runner exits from
+      - name: Ask Harbor, anonymously, and publish what comes back
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo -n "egress IP: "
-          curl -s https://api.ipify.org || echo "(lookup failed)"
-          echo
+          set -uo pipefail
 
-      - name: Anonymous request to Harbor
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            https://harbor.jatimprov.go.id/v2/)
+          ip=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)
+          server=$(curl -s -D - -o /dev/null https://harbor.jatimprov.go.id/v2/ \
+            | grep -i '^server:' | tr -d '\r' | head -1)
+
+          desc="v2=${code} ip=${ip} ${server}"
+          echo "$desc"
+
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"harbor-probe",description:process.argv[1].slice(0,140)}))' "$desc")"
+
+      - name: Also record what the token endpoint says
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "--- GET /v2/ (no credentials) ---"
-          curl -s -o /dev/null -w "status: %{http_code}\n" \
-            https://harbor.jatimprov.go.id/v2/
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://harbor.jatimprov.go.id/service/token?service=harbor-registry&scope=repository:panda/panda-docker:pull")
+          echo "token endpoint: ${code}"
 
-          echo
-          echo "--- response headers ---"
-          curl -s -D - -o /dev/null https://harbor.jatimprov.go.id/v2/ | head -25
-
-      - name: Anonymous token request
-        run: |
-          echo "--- GET /service/token (no credentials) ---"
-          curl -s -o /dev/null -w "status: %{http_code}\n" \
-            "https://harbor.jatimprov.go.id/service/token?service=harbor-registry&scope=repository:panda/panda-docker:pull"
-
-      - name: For comparison, a host that is definitely not blocked
-        run: |
-          echo -n "github.com/v2/ equivalent: "
-          curl -s -o /dev/null -w "%{http_code}\n" https://api.github.com/
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"harbor-probe-token",description:("token-endpoint="+process.argv[1]).slice(0,140)}))' "$code")"
