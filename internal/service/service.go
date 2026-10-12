@@ -74,6 +74,16 @@ type Service struct {
 	// and an encryption key that leaked would not let an attacker forge a
 	// matching index.
 	indexKey []byte
+	keyGuard Reachability
+}
+
+// Reachability is an optional freshness check on the key provider.
+//
+// Implemented by internal/keyguard. Optional because a test or a deployment
+// with no caching needs nothing here — but when present, the unmask path
+// consults it before proceeding.
+type Reachability interface {
+	Reachable() bool
 }
 
 // Options configures a Service.
@@ -81,6 +91,8 @@ type Options struct {
 	Cipher   *crypto.FieldCipher
 	Audit    AuditSink
 	IndexKey []byte
+	// KeyGuard, when set, is checked before every unmask.
+	KeyGuard Reachability
 }
 
 // New builds a Service. A nil audit sink is replaced by a discarding one.
@@ -92,7 +104,12 @@ func New(opts Options) (*Service, error) {
 	if sink == nil {
 		sink = nopSink{}
 	}
-	return &Service{cipher: opts.Cipher, audit: sink, indexKey: opts.IndexKey}, nil
+	return &Service{
+		cipher:   opts.Cipher,
+		audit:    sink,
+		indexKey: opts.IndexKey,
+		keyGuard: opts.KeyGuard,
+	}, nil
 }
 
 // EncryptResult is what a caller gets back from Encrypt.
@@ -186,6 +203,22 @@ type DecryptRawResult struct {
 // and the distinct method is what makes it visible at the call site — in
 // review, in a diff, and in the audit stream.
 func (s *Service) DecryptRaw(actor Actor, envelope string) (*DecryptRawResult, error) {
+	// Reachability is checked before the unmask, not after.
+	//
+	// Everywhere else a short window of cached keys is an acceptable trade for
+	// surviving a provider blip. Here it is not: a full value decrypted under
+	// a key the provider would now refuse to serve is exactly what a
+	// revocation was performed to prevent. So this path refuses rather than
+	// falling back to cache.
+	if s.keyGuard != nil && !s.keyGuard.Reachable() {
+		s.audit.Record(AuditRecord{
+			Operation: "decrypt_raw", Outcome: "failure", Actor: actor,
+			ErrorCode: apierr.CodeKeyProviderUnavailable,
+		})
+		return nil, apierr.New(apierr.CodeKeyProviderUnavailable,
+			"the key provider is unreachable; refusing to unmask on cached key material")
+	}
+
 	env, err := crypto.ParseEnvelope(envelope)
 	if err != nil {
 		s.audit.Record(AuditRecord{
