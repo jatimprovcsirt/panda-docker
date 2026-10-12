@@ -17,6 +17,13 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Scoped to this job rather than the whole workflow, so the default token
+    # stays read-only. `contents: write` is what the release step at the bottom
+    # needs to create the GitHub Release — without it that step fails with
+    # "Resource not accessible by integration" after the image is already in
+    # Harbor, leaving a published image with no release record behind it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -77,11 +84,37 @@ jobs:
 
       # The offline path: sites with no route to Harbor load the image from a
       # tarball on removable media.
-      - name: Produce an offline tarball
+      #
+      # One tarball per architecture, not one tarball. A `docker pull` with no
+      # --platform resolves to the runner's own architecture — amd64 on GitHub
+      # runners — so a single tarball would ship amd64 while the registry holds
+      # both, and the site opening the tarball on an ARM box would get
+      # `exec format error` with nothing in the filename to explain why. The
+      # site that most needs an offline tarball is also the one most likely to
+      # be running something other than x86_64.
+      - name: Produce offline tarballs
         run: |
-          docker pull "${IMAGE}:${VERSION}"
-          docker save "${IMAGE}:${VERSION}" -o "panda-docker-${VERSION}.tar"
-          sha256sum "panda-docker-${VERSION}.tar" > "panda-docker-${VERSION}.tar.sha256"
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            tar="panda-docker-${VERSION}-linux-${arch}.tar"
+
+            docker pull --platform "linux/${arch}" "${IMAGE}:${VERSION}"
+            docker save "${IMAGE}:${VERSION}" -o "${tar}"
+            sha256sum "${tar}" > "${tar}.sha256"
+
+            # Verify the tarball holds the architecture its filename claims,
+            # rather than trusting that the flags above did what they say. A
+            # mislabelled tarball is worse than a missing one: it fails at the
+            # offline site, days later, with no route back to a registry to
+            # diagnose it against.
+            docker load -i "${tar}" > /dev/null 2>&1
+            got="$(docker inspect --format '{{.Architecture}}' "${IMAGE}:${VERSION}")"
+            if [ "${got}" != "${arch}" ]; then
+              echo "FAIL: ${tar} holds ${got}, expected ${arch}"
+              exit 1
+            fi
+            echo "ok: ${tar} (${arch})"
+          done
 
       - uses: softprops/action-gh-release@v2
         with:
