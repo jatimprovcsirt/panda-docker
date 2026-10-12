@@ -1,26 +1,27 @@
-name: Probe registry reachability and BuildKit push
+name: Probe the fallback publish path
 
-# TEMPORARY DIAGNOSTIC — delete once the question below is answered.
+# TEMPORARY DIAGNOSTIC — delete once the questions below are answered.
 #
 # Harbor sits behind Cloudflare, and a custom rule there rejects connections
-# from outside Indonesia. A GitHub-hosted runner (Azure, US) is refused with
-# 403 before Harbor sees the request — verified with no credentials, so it
-# was never an auth problem.
+# from outside Indonesia. A GitHub-hosted runner is refused with 403 before
+# Harbor sees the request. Mutual TLS is the remedy.
 #
-# Mutual TLS is the remedy, and two things are now settled: curl reaches
-# Harbor with the certificate, and the Docker daemon does too (login and
-# pull both succeed once the certificate is in /etc/docker/certs.d/).
+# Settled so far:
+#   - curl with the certificate reaches Harbor            (401, not 403)
+#   - docker login and docker pull work from the daemon   (cert in certs.d)
+#   - BuildKit does NOT present the certificate, so
+#     `buildx build --push` dies at the Cloudflare edge   (HTML in the log)
 #
-# What is NOT settled: build-push-action pushes from BuildKit, which runs in
-# its own container, and that container cannot see the host's certs.d. A
-# successful login followed by a failed push is the confusing failure this
-# would produce. So: copy the certificate in and try an actual push.
+# BuildKit is what build-push-action pushes with, so the all-in-one step is
+# out. What remains is whether the fallback holds: build per architecture
+# into the daemon, push each from the daemon, then assemble a manifest list.
+# The manifest commands talk to the registry from the CLI rather than the
+# daemon, so whether they honour certs.d is a separate question again.
 #
-# The push target is a throwaway repository, deleted in the same run.
+# Also deletes the previous run's leftover repository, which its own cleanup
+# step failed to remove because it called the API without a certificate.
 #
 # Answers are published as commit statuses; job logs need repository admin.
-#
-# Path-filtered to itself so it does not run on unrelated pushes.
 
 on:
   push:
@@ -34,7 +35,7 @@ permissions:
 
 env:
   HARBOR: harbor.jatimprov.go.id
-  SCRATCH_REPO: panda/probe-delete-me
+  SCRATCH: panda/probe-delete-me
 
 jobs:
   probe:
@@ -47,26 +48,17 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p /tmp/cf
-
-          if [ -z "${CLIENT_CERT:-}" ] || [ -z "${CLIENT_KEY:-}" ]; then
-            echo "one or both secrets are empty"
-            exit 0
-          fi
-
-          # CRLF would make OpenSSL reject the PEM with a parse error that
-          # reads like a wrong certificate rather than a stray carriage return.
           printf '%s\n' "$CLIENT_CERT" | tr -d '\r' > /tmp/cf/client.crt
           printf '%s\n' "$CLIENT_KEY"  | tr -d '\r' > /tmp/cf/client.key
           chmod 600 /tmp/cf/client.key
-          echo "cert and key written"
 
-      - name: Install the certificate where Docker looks for it
-        run: |
-          set -uo pipefail
           sudo mkdir -p "/etc/docker/certs.d/${HARBOR}"
           sudo cp /tmp/cf/client.crt "/etc/docker/certs.d/${HARBOR}/client.cert"
           sudo cp /tmp/cf/client.key "/etc/docker/certs.d/${HARBOR}/client.key"
           sudo chmod 600 "/etc/docker/certs.d/${HARBOR}/client.key"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log in
         env:
@@ -76,47 +68,51 @@ jobs:
           set -uo pipefail
           echo "$HARBOR_PASSWORD" | docker login "$HARBOR" -u "$HARBOR_USERNAME" --password-stdin
 
-      - name: Copy the certificate into BuildKit and push a throwaway image
+      - name: Build per architecture and push from the daemon
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          mkdir -p /tmp/scratch
+          printf 'FROM scratch\nCOPY probe.txt /probe.txt\n' > /tmp/scratch/Dockerfile
+          echo probe > /tmp/scratch/probe.txt
 
-          docker buildx create --name probe --driver docker-container --use >/dev/null 2>&1
-          docker buildx inspect --bootstrap >/dev/null 2>&1
+          report() {
+            echo "[$1] $2 :: $3"
+            curl -s -o /dev/null -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+              -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:process.argv[1],description:(process.argv[2]+" "+process.argv[3]).slice(0,140)}))' "$1" "$2" "$3")"
+          }
 
-          bk=$(docker ps --filter "name=buildx_buildkit_probe" --format '{{.Names}}' | head -1)
-          if [ -z "$bk" ]; then
-            result="no-buildkit-container"
-          else
-            # The question, stated directly: does BuildKit's resolver read
-            # client certificates from its own /etc/docker/certs.d?
-            docker exec "$bk" mkdir -p "/etc/docker/certs.d/${HARBOR}" 2>/dev/null
-            docker cp /tmp/cf/client.crt "$bk:/etc/docker/certs.d/${HARBOR}/client.cert"
-            docker cp /tmp/cf/client.key "$bk:/etc/docker/certs.d/${HARBOR}/client.key"
-
-            mkdir -p /tmp/scratch
-            printf 'FROM scratch\nCOPY probe.txt /probe.txt\n' > /tmp/scratch/Dockerfile
-            echo probe > /tmp/scratch/probe.txt
-
-            if docker buildx build \
-                 --platform linux/amd64,linux/arm64 \
-                 -t "${HARBOR}/${SCRATCH_REPO}:buildkit" \
-                 --push /tmp/scratch >/tmp/cf/bk.log 2>&1; then
-              result="PUSH-OK"
-            else
-              result="push-failed"
+          # --- push from the daemon, per architecture ---------------------
+          pushdetail=""
+          pushresult="PUSH-OK"
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/${arch}" \
+              -t "${HARBOR}/${SCRATCH}:${arch}" --load /tmp/scratch >/dev/null 2>&1
+            if ! docker push "${HARBOR}/${SCRATCH}:${arch}" >/tmp/cf/push-${arch}.log 2>&1; then
+              pushresult="push-failed(${arch})"
+              pushdetail=$(tail -3 /tmp/cf/push-${arch}.log | tr '\n' ' ' | tr -s ' ')
             fi
+          done
+          report "daemon-push" "$pushresult" "${pushdetail:0:80}"
+
+          # --- manifest list, built by the CLI, not the daemon -------------
+          mandetail=""
+          manresult="MANIFEST-OK"
+          if [ "$pushresult" = "PUSH-OK" ]; then
+            docker manifest create "${HARBOR}/${SCRATCH}:multi" \
+              "${HARBOR}/${SCRATCH}:amd64" "${HARBOR}/${SCRATCH}:arm64" >/tmp/cf/man.log 2>&1
+            if ! docker manifest push "${HARBOR}/${SCRATCH}:multi" >>/tmp/cf/man.log 2>&1; then
+              manresult="manifest-failed"
+              mandetail=$(tail -3 /tmp/cf/man.log | tr '\n' ' ' | tr -s ' ')
+            fi
+          else
+            manresult="skipped"
           fi
-
-          detail=$(tail -3 /tmp/cf/bk.log 2>/dev/null | tr '\n' ' ' | tr -s ' ' | head -c 80)
-          echo "buildkit push: $result :: $detail"
-
-          curl -s -o /dev/null -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"buildkit-push",description:(process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
+          report "manifest-list" "$manresult" "${mandetail:0:80}"
 
       - name: Remove the throwaway repository
         env:
@@ -125,14 +121,16 @@ jobs:
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
           set -uo pipefail
-
+          # With the certificate this time: without it the request is refused
+          # at the edge and the repository is never actually removed.
           code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+            --cert /tmp/cf/client.crt --key /tmp/cf/client.key \
             -u "${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
-            "https://${HARBOR}/api/v2.0/projects/panda/repositories/${SCRATCH_REPO#panda/}")
+            "https://${HARBOR}/api/v2.0/projects/panda/repositories/${SCRATCH#panda/}")
           echo "cleanup status: $code"
 
           curl -s -o /dev/null -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cleanup",description:("delete "+process.argv[1]).slice(0,140)}))' "$code")"
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cleanup",description:("delete http "+process.argv[1]).slice(0,140)}))' "$code")"
