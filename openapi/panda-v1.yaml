@@ -1,0 +1,488 @@
+openapi: 3.1.0
+
+info:
+  title: PANDA Docker API
+  version: 1.0.0
+  summary: Field-level encryption for personal data, over HTTP.
+  description: |
+    PANDA encrypts individual field values — a NIK, a family card number, a
+    health record — so that a database dump, a backup, or a misdirected query
+    does not expose them.
+
+    ## Masking is the default
+
+    `POST /v1/decrypt` returns a **masked** value (`32************01`), which
+    is safe to put in an API response or a log line without further thought.
+    Reading the full plaintext is a separate endpoint, `POST /v1/decrypt/raw`,
+    which requires its own scope and is audited on every call.
+
+    That separation is deliberate. A single endpoint with a `raw: true` flag
+    would be one careless argument away from leaking full values, and a boolean
+    is exactly the kind of thing that gets flipped without anyone noticing in
+    review.
+
+    ## Scopes
+
+    Every API key carries a set of scopes. There is no wildcard.
+
+    | Scope | Grants |
+    |---|---|
+    | `encrypt` | `POST /v1/encrypt` |
+    | `decrypt` | `POST /v1/decrypt` — masked values only |
+    | `unmask` | `POST /v1/decrypt/raw` |
+    | `mask` | `POST /v1/mask` |
+    | `blindindex` | `POST /v1/blind-index` |
+
+    A typical application holds `encrypt` and `blindindex` on its write path
+    and `decrypt` on its read path, and never holds `unmask`. A credential
+    without `unmask` cannot reach the full plaintext no matter what else it
+    holds.
+
+    ## Authentication
+
+    Callers present a client certificate **and** a bearer API key. Both are
+    required in production: a leaked key is useless without the certificate,
+    and a leaked certificate is useless without the key.
+
+    Client certificates are configured in your HTTP client, not in a header.
+
+servers:
+  - url: https://panda.internal:8080
+    description: On-premises deployment
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Encryption
+  - name: Decryption
+  - name: Search
+  - name: System
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/encrypt:
+    post:
+      tags: [Encryption]
+      summary: Encrypt a value
+      description: |
+        Produces a PANDA envelope — a JSON string that holds the ciphertext and
+        the metadata needed to read it back.
+
+        Store the envelope as-is in a `TEXT` column. Do not parse it, and do
+        not size the column for the plaintext: an envelope is roughly 1.34× the
+        plaintext plus about 130 characters of JSON and nonce overhead.
+      operationId: encrypt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plaintext]
+              properties:
+                plaintext:
+                  type: string
+                  minLength: 1
+                  description: The value to encrypt.
+                  examples: ["3201012501990001"]
+                kid:
+                  type: string
+                  description: |
+                    Key identifier. Omit to use the deployment's default key.
+                    Naming a key explicitly is what makes rotation possible
+                    later without re-encrypting everything.
+                  examples: ["opd-dukcapil-key-1"]
+      responses:
+        "200":
+          description: The envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [envelope, kid, v]
+                properties:
+                  envelope:
+                    type: string
+                    description: The envelope JSON. Store this verbatim.
+                  kid:
+                    type: string
+                  v:
+                    type: integer
+                    description: Envelope format version.
+                    const: 1
+              example:
+                envelope: '{"v":1,"alg":"aes-256-gcm","kid":"opd-dukcapil-key-1","nonce":"...","ciphertext":"..."}'
+                kid: opd-dukcapil-key-1
+                v: 1
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/decrypt:
+    post:
+      tags: [Decryption]
+      summary: Decrypt to a masked value
+      description: |
+        Returns a partially redacted value, for example `32************01`.
+
+        This is the read path for almost every caller. The masked value is
+        safe to return in an API response, write to a log, or display in a
+        frontend without any further protection.
+
+        To read the full plaintext, use `POST /v1/decrypt/raw` — which needs
+        the `unmask` scope.
+      operationId: decrypt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [envelope]
+              properties:
+                envelope:
+                  type: string
+                  minLength: 1
+                  description: The envelope JSON, exactly as stored.
+      responses:
+        "200":
+          description: The masked value.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value, masked]
+                properties:
+                  value:
+                    type: string
+                    examples: ["32************01"]
+                  masked:
+                    type: boolean
+                    const: true
+                  kid:
+                    type: string
+                    description: The key the value was encrypted under.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/decrypt/raw:
+    post:
+      tags: [Decryption]
+      summary: Decrypt to the full plaintext
+      description: |
+        Returns the original value. **Requires the `unmask` scope.**
+
+        Every call is recorded in the audit log with the caller's API key id
+        and client-certificate Common Name. That record is what answers "who
+        read this citizen's data, and when" during a UU PDP audit.
+
+        Before you use this endpoint, consider whether you need to:
+
+        - **Displaying a value?** Use `POST /v1/decrypt`. The masked form is
+          usually what the screen should show anyway.
+        - **Looking a record up by value?** Use `POST /v1/blind-index` and
+          query the index column. That never decrypts anything.
+        - **Exporting data?** Ask whether the export needs full values, or
+          whether masked ones serve the purpose.
+
+        If the answer is still yes, this is the right endpoint — and the audit
+        record is how you demonstrate that the decision was deliberate.
+      operationId: decryptRaw
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [envelope]
+              properties:
+                envelope:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: The full plaintext value.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value, masked]
+                properties:
+                  value:
+                    type: string
+                    examples: ["3201012501990001"]
+                  masked:
+                    type: boolean
+                    const: false
+                  kid:
+                    type: string
+                  audit_id:
+                    type: string
+                    description: |
+                      Correlates this call with the server's audit record.
+                      Log it alongside your own request id.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            The credential is valid but does not hold the `unmask` scope.
+            Ask for the scope; do not reach for a different credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: forbidden
+                  message: this API key does not hold the unmask scope
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/mask:
+    post:
+      tags: [Decryption]
+      summary: Mask a value you already hold
+      description: |
+        Applies PANDA's masking to a plaintext value, without any encryption
+        involved.
+
+        For a caller that has a plaintext from somewhere else — an import
+        pipeline, a report, a migration — and needs the same masking the
+        service would apply on a read.
+      operationId: mask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: The masked value.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: { type: string, examples: ["32************01"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/blind-index:
+    post:
+      tags: [Search]
+      summary: Compute a searchable index for a value
+      description: |
+        Produces a deterministic HMAC index for a value, so a record can be
+        found by exact match without decrypting anything.
+
+        Store it in a separate column — conventionally `<field>_bidx` — and
+        query that column:
+
+        ```sql
+        SELECT * FROM citizens WHERE nik_bidx = $1;
+        ```
+
+        ## The index is immutable
+
+        It is derived from the value and the index key. Changing the key means
+        re-indexing every row, and rows indexed under a different key will
+        never match. Decide the key before the first row is written.
+
+        ## What it leaks, and why that matters
+
+        The index is deterministic: two rows with the same value have the same
+        index. For an identifier like a NIK that reveals almost nothing,
+        because the value is unique anyway.
+
+        For a low-cardinality field it reveals almost everything. An index on
+        `blood_type` across ten thousand rows is a list of blood types, even
+        though the encrypted column beside it is not. **Do not blind-index
+        demographic fields.** Religion, gender, marital status and blood type
+        are categories UU PDP treats as sensitive on their own.
+      operationId: blindIndex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string, minLength: 1 }
+                kid:
+                  type: string
+                  description: Key identifier, for grouping indexes by key.
+      responses:
+        "200":
+          description: The index.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index:
+                    type: string
+                    description: Lowercase hex. Store in a `VARCHAR(64)`.
+                  kid: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/version:
+    get:
+      tags: [System]
+      summary: What this instance is running
+      description: |
+        Reachable without credentials, deliberately: an operator debugging a
+        deployment needs to be able to ask what is running before they can
+        authenticate against it.
+      operationId: version
+      security: []
+      responses:
+        "200":
+          description: Build information.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { type: string }
+                  sdk:
+                    type: string
+                    description: The PANDA SDK version this build links against.
+                  time: { type: string, format: date-time }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        A PANDA service API key, prefixed `panda_svc_`.
+
+        Distinct from a registration token (`panda_live_`): that authorises a
+        one-time key-generation event, this authenticates a running service.
+        A credential that works for the wrong purpose should be recognisable
+        as the wrong kind at a glance.
+
+        Send it as `Authorization: Bearer panda_svc_...`. Never as a query
+        parameter — that puts a live credential into access logs, referrer
+        headers, and browser history.
+    clientCert:
+      type: mutualTLS
+      description: |
+        A client certificate signed by the deployment's PANDA client CA.
+        Required in production alongside the bearer key.
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                The stable identifier. **Key your error handling off this
+                string, not off the HTTP status** — the status is transport
+                decoration, and the same code appears in the gRPC transport as
+                a status detail.
+              enum:
+                - malformed_envelope
+                - auth_failed
+                - unknown_kid
+                - invalid_plaintext
+                - unauthorized
+                - forbidden
+                - not_found
+                - payload_too_large
+                - rate_limited
+                - key_provider_unavailable
+                - shred_disabled
+                - internal
+            message:
+              type: string
+              description: |
+                Written for a human, and safe to log. Never contains the
+                plaintext, key material, or the contents of a failed envelope.
+
+  responses:
+    BadRequest:
+      description: |
+        The request was rejected. Inspect `error.code`:
+
+        - `malformed_envelope` — not a valid PANDA envelope, or the column
+          truncated it
+        - `auth_failed` — the ciphertext failed authentication. Either it was
+          tampered with, or it was encrypted under a different key
+        - `unknown_kid` — the envelope names a key this deployment cannot
+          resolve
+        - `invalid_plaintext` — empty or otherwise unusable input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: auth_failed
+              message: the ciphertext failed authentication
+
+    Unauthorized:
+      description: |
+        No credential, an invalid one, or a certificate that does not match the
+        key's pinned Common Name.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    Forbidden:
+      description: |
+        The credential is valid but lacks the scope this operation needs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    RateLimited:
+      description: |
+        Too many requests for this credential. The `Retry-After` header says
+        how long to wait.
+
+        Limits are per credential, not global, so one noisy application does
+        not consume the budget for everyone else.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    Unavailable:
+      description: |
+        The key provider is unreachable, so no key can be resolved.
+
+        The service fails closed here rather than guessing. For an ordinary
+        read it may serve from cache within a short window; for `decrypt/raw`
+        it refuses, because a full value decrypted under a key the provider
+        would no longer serve is exactly what a revocation was performed to
+        prevent.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: key_provider_unavailable
+              message: the key provider is unreachable; refusing to unmask on cached key material
