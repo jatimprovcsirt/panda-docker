@@ -1,0 +1,90 @@
+name: Release
+
+# Triggered by a version tag. Publishing to Harbor is the step that makes an
+# image available to OPDs, so everything before it verifies the artifact that
+# is about to be published rather than the source it came from.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: harbor.jatimprov.go.id
+  IMAGE: harbor.jatimprov.go.id/panda/panda-docker
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: Tag matches the build arguments
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "COMMIT=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      # Both architectures: OPD infrastructure in Jawa Timur is predominantly
+      # x86_64, but arm64 costs little and covers ARM-based on-prem servers and
+      # developer machines.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ env.COMMIT }}
+          # Provenance and SBOM travel with the image, so a consumer can check
+          # what produced it rather than trusting the tag.
+          provenance: true
+          sbom: true
+
+      - name: Scan the published image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.VERSION }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          # Only fail on findings that have a fix available. Failing on an
+          # unfixable base-image CVE blocks every release until upstream moves,
+          # and a permanently red gate is one people learn to bypass.
+          ignore-unfixed: true
+
+      # The offline path: sites with no route to Harbor load the image from a
+      # tarball on removable media.
+      - name: Produce an offline tarball
+        run: |
+          docker pull "${IMAGE}:${VERSION}"
+          docker save "${IMAGE}:${VERSION}" -o "panda-docker-${VERSION}.tar"
+          sha256sum "panda-docker-${VERSION}.tar" > "panda-docker-${VERSION}.tar.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            panda-docker-*.tar
+            panda-docker-*.tar.sha256

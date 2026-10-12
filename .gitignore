@@ -7,3 +7,4 @@ coverage.txt
 .env.*
 !.env.example
 .tmpkeys/
+.tk/

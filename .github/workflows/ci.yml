@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Vet, test, and build the image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      # The interop tests skip themselves when the sibling SDK repositories are
+      # absent, which they are here. That is deliberate: a CI that silently
+      # reports a pass it did not earn is worse than one that is honest about
+      # its scope. The interop suite runs in the nightly workflow, where all
+      # four repositories are checked out.
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Build the container image
+        run: |
+          docker build \
+            --build-arg VERSION=0.0.0-ci \
+            --build-arg COMMIT="${GITHUB_SHA::8}" \
+            -t panda-docker:ci .
+
+      # A published image that exceeds the size budget has almost always
+      # acquired something nobody intended — a shell, a package manager, a
+      # second binary. Asserting the budget asserts the absence.
+      - name: Assert the image stays small
+        run: |
+          size=$(docker image inspect panda-docker:ci --format '{{.Size}}')
+          mb=$((size / 1024 / 1024))
+          echo "image is ${mb} MB"
+          if [ "$mb" -gt 30 ]; then
+            echo "::error::image is ${mb} MB, over the 30 MB budget"
+            exit 1
+          fi
+
+      - name: Assert the image has no shell
+        run: |
+          if docker run --rm --entrypoint sh panda-docker:ci -c true 2>/dev/null; then
+            echo "::error::the image contains a shell"
+            exit 1
+          fi
+          echo "no shell present"
+
+      - name: Assert the container runs as non-root
+        run: |
+          user=$(docker image inspect panda-docker:ci --format '{{.Config.User}}')
+          if [ "$user" != "65532:65532" ]; then
+            echo "::error::image runs as '${user}', expected 65532:65532"
+            exit 1
+          fi
+
+      # The checks a unit test cannot make. Lives in scripts/smoke.sh rather
+      # than inline: embedding shell in YAML means every backslash survives two
+      # escaping layers, and a broken sed backreference is silent.
+      - name: Smoke test the container
+        run: |
+          chmod +x scripts/smoke.sh
+          scripts/smoke.sh panda-docker:ci

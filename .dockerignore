@@ -1,0 +1,11 @@
+.git
+.github
+*.exe
+*.test
+*.out
+coverage.txt
+.tmpkeys
+.tk
+docs/
+*.md
+!README.md
