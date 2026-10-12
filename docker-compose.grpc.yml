@@ -1,0 +1,17 @@
+# Overlay that switches an instance to the gRPC transport.
+#
+#   docker compose -f docker-compose.dev.yml -f docker-compose.grpc.yml up
+#
+# A separate file rather than a variable in the base, because the port has to
+# move with the protocol — publishing 8080 while listening on 9090 produces a
+# container that looks like it started and answers nothing.
+services:
+  panda-docker:
+    environment:
+      PANDA_API_PROTOCOL: grpc
+      # Reflection lets grpcurl work without a local copy of the proto. Fine in
+      # development; it also lets anyone enumerate the API, which is why the
+      # production manifests leave it off.
+      PANDA_GRPC_REFLECTION: "true"
+    ports:
+      - "127.0.0.1:9090:9090"

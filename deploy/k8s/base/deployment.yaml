@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: panda-docker
+  namespace: panda
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: panda-docker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: panda-docker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      serviceAccountName: panda-docker
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: harbor-panda
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: panda-docker
+          image: harbor.jatimprov.go.id/panda/panda-docker:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: api
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: panda-docker-config
+            - secretRef:
+                name: panda-docker-secrets
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/panda/tls
+              readOnly: true
+            - name: api-keys
+              mountPath: /etc/panda/keys
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tls
+          secret:
+            secretName: panda-docker-tls
+            defaultMode: 0400
+        - name: api-keys
+          secret:
+            secretName: panda-docker-api-keys
+            defaultMode: 0400

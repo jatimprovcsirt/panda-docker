@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: panda-docker-config
+  namespace: panda
+data:
+  PANDA_ENV: "production"
+  PANDA_API_PROTOCOL: "rest"
+  PANDA_LISTEN_ADDR: "0.0.0.0"
+  PANDA_REST_PORT: "8080"
+  PANDA_GRPC_PORT: "9090"
+  PANDA_HEALTH_PORT: "8081"
+  PANDA_GRPC_REFLECTION: "false"
+  PANDA_AUTH_MODE: "mtls+apikey"
+  PANDA_TLS_ENABLED: "true"
+  PANDA_TLS_CERT_FILE: "/etc/panda/tls/tls.crt"
+  PANDA_TLS_KEY_FILE: "/etc/panda/tls/tls.key"
+  PANDA_TLS_CLIENT_CA_FILE: "/etc/panda/tls/client-ca.crt"
+  PANDA_API_KEY_STORE: "/etc/panda/keys/api-keys.json"
+  PANDA_MAX_REQUEST_BYTES: "1048576"
+  PANDA_MAX_BATCH_SIZE: "500"
+  PANDA_RATE_LIMIT_RPS: "100"
+  PANDA_RATE_LIMIT_BURST: "200"
+  PANDA_REQUEST_TIMEOUT: "10s"
+  PANDA_SHUTDOWN_GRACE: "15s"
+  PANDA_STARTUP_REQUIRE_KEY_PROVIDER: "true"
+  PANDA_ENABLE_SHRED: "false"
+  PANDA_KEY_CACHE_TTL: "300s"
+  PANDA_KEY_CACHE_MAX_STALE: "0s"
+  PANDA_KEY_PROVIDER_DRIVER: "vault"
+  PANDA_VAULT_MOUNT_PATH: "secret"
+  PANDA_VAULT_AUTH_METHOD: "approle"
+  PANDA_LOG_FORMAT: "json"
+  PANDA_LOG_LEVEL: "info"
+  PANDA_AUDIT_SINK: "stdout"
+  PANDA_METRICS_ENABLED: "true"

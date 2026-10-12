@@ -1,0 +1,85 @@
+# PANDA Docker — single-VM deployment.
+#
+# The shape here assumes the container is reachable from an OPD network and
+# nothing else. It is not a public service: a network-reachable decryption
+# endpoint with weak credentials is a bulk plaintext exfiltration path, which
+# is why the API port is bound to loopback and TLS is mandatory in production.
+name: panda
+
+services:
+  panda-docker:
+    image: ${PANDA_IMAGE:-harbor.jatimprov.go.id/panda/panda-docker:0.1.0}
+    restart: unless-stopped
+
+    # Bound to loopback, not 0.0.0.0. Reaching this from another host requires
+    # going through a reverse proxy that terminates TLS — the alternative is
+    # that someone "temporarily" exposes the port and forgets.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    environment:
+      PANDA_ENV: production
+      PANDA_API_PROTOCOL: rest
+
+      # The only mode permitted in production. The container refuses to start
+      # with anything weaker, which is the point: a misconfiguration is a
+      # startup failure rather than a silent exposure.
+      PANDA_AUTH_MODE: mtls+apikey
+
+      PANDA_TLS_ENABLED: "true"
+      PANDA_TLS_CERT_FILE: /etc/panda/tls/tls.crt
+      PANDA_TLS_KEY_FILE: /etc/panda/tls/tls.key
+      PANDA_TLS_CLIENT_CA_FILE: /etc/panda/tls/client-ca.crt
+
+      PANDA_API_KEY_STORE: /etc/panda/keys/api-keys.json
+
+      PANDA_LOG_FORMAT: json
+      PANDA_AUDIT_SINK: stdout
+      PANDA_METRICS_ENABLED: "true"
+
+      # Crypto-shredding is not exposed over HTTP — it is irreversible and
+      # belongs in a CLI an operator runs deliberately. Left off, and stated
+      # here so nobody re-enables it expecting a feature.
+      PANDA_ENABLE_SHRED: "false"
+
+      PANDA_KEY_PROVIDER_DRIVER: vault
+      PANDA_VAULT_URL: ${PANDA_VAULT_URL:?set PANDA_VAULT_URL}
+      PANDA_VAULT_AUTH_METHOD: approle
+      PANDA_VAULT_ROLE_ID: ${PANDA_VAULT_ROLE_ID:?set PANDA_VAULT_ROLE_ID}
+      PANDA_VAULT_SECRET_ID: ${PANDA_VAULT_SECRET_ID:?set PANDA_VAULT_SECRET_ID}
+      PANDA_VAULT_MOUNT_PATH: ${PANDA_VAULT_MOUNT_PATH:-secret}
+
+      # No key material in this file, and none in the image. The provider
+      # fetches it, and the container holds it only in memory.
+      PANDA_INDEX_KEY: ${PANDA_INDEX_KEY:?set PANDA_INDEX_KEY}
+
+    volumes:
+      - ./certs:/etc/panda/tls:ro
+      - ./keys:/etc/panda/keys:ro
+
+    # The container writes nothing, so the root filesystem can be read-only.
+    # Anything that tried to write would fail loudly instead of quietly
+    # succeeding into a layer that is lost on restart.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD", "/panda-docker", "healthcheck", "--url=http://127.0.0.1:8081/readyz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 256M }
+        reservations: { cpus: "0.25", memory: 64M }
+
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
