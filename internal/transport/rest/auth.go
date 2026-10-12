@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jatimprovcsirt/panda-docker/internal/apierr"
 	"github.com/jatimprovcsirt/panda-docker/internal/auth"
@@ -35,6 +36,15 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			// never sees an unverified certificate, which is the point of
 			// doing the check there rather than here.
 			creds.ClientCert = r.TLS.PeerCertificates[0]
+		}
+
+		// Rate limiting runs after authentication so it is per credential,
+		// and before the handler so it bounds work that has not happened yet.
+		// A limiter placed after the expensive path has not limited the cost
+		// it exists to limit.
+		if !s.limiter.Allow(creds.Token) {
+			s.writeError(w, apierr.New(apierr.CodeRateLimited, "too many requests"))
+			return
 		}
 
 		result, err := s.auth.Authenticate(r.Context(), creds)
@@ -134,4 +144,80 @@ func bearerToken(r *http.Request) string {
 		return ""
 	}
 	return strings.TrimSpace(header[len(scheme):])
+}
+
+// observe records every request's outcome and latency.
+//
+// Wrapped outside authentication so an unauthenticated flood is visible in the
+// metrics rather than invisible — a service that only counts successful
+// requests cannot show that it is being probed.
+func (s *Server) observe(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		outcome := "success"
+		if rec.status >= 400 {
+			outcome = "failure"
+		}
+		s.metrics.RecordRequest(
+			operationForPath(r.URL.Path),
+			outcome,
+			codeForStatus(rec.status),
+			time.Since(start).Seconds(),
+		)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// operationForPath maps a route to a stable operation name.
+//
+// Derived from the route rather than the request, so an unknown path cannot
+// create a new metric label — an unbounded label set is a memory exhaustion
+// vector wearing an observability costume.
+func operationForPath(path string) string {
+	switch path {
+	case "/v1/encrypt":
+		return "encrypt"
+	case "/v1/decrypt":
+		return "decrypt"
+	case "/v1/decrypt/raw":
+		return "decrypt_raw"
+	case "/v1/mask":
+		return "mask"
+	case "/v1/blind-index":
+		return "blind_index"
+	case "/v1/version":
+		return "version"
+	default:
+		return "other"
+	}
+}
+
+func codeForStatus(status int) string {
+	switch status {
+	case 200:
+		return ""
+	case 401:
+		return "unauthorized"
+	case 403:
+		return "forbidden"
+	case 429:
+		return "rate_limited"
+	case 503:
+		return "unavailable"
+	default:
+		return "error"
+	}
 }

@@ -26,6 +26,8 @@ import (
 	pandav1 "github.com/jatimprovcsirt/panda-docker/gen/panda/v1"
 	"github.com/jatimprovcsirt/panda-docker/internal/auth"
 	"github.com/jatimprovcsirt/panda-docker/internal/config"
+	"github.com/jatimprovcsirt/panda-docker/internal/metrics"
+	"github.com/jatimprovcsirt/panda-docker/internal/ratelimit"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 	"github.com/jatimprovcsirt/panda-docker/internal/tlscfg"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/grpctransport"
@@ -76,7 +78,14 @@ type slogLogger = slog.Logger
 // The inactive protocol is not built at all. It would be easy to construct
 // both and bind one, but then a future change that binds the wrong one is a
 // silent exposure rather than a compile-time absence.
-func buildAPI(cfg *config.Config, svc *service.Service, authenticator *auth.Authenticator, log *slog.Logger) (apiServer, string, error) {
+func buildAPI(
+	cfg *config.Config,
+	svc *service.Service,
+	authenticator *auth.Authenticator,
+	reg *metrics.Registry,
+	limiter *ratelimit.Limiter,
+	log *slog.Logger,
+) (apiServer, string, error) {
 	switch cfg.Protocol {
 	case config.ProtocolREST:
 		srv, err := rest.New(rest.Options{
@@ -84,6 +93,8 @@ func buildAPI(cfg *config.Config, svc *service.Service, authenticator *auth.Auth
 			Logger:          log,
 			MaxRequestBytes: cfg.MaxRequestBytes,
 			Authenticator:   authenticator,
+			Metrics:         reg,
+			Limiter:         limiter,
 		})
 		if err != nil {
 			return nil, "", err

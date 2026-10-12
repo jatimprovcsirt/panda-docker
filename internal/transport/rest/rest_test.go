@@ -254,7 +254,7 @@ func TestPanicBecomesA500(t *testing.T) {
 // --- health ---------------------------------------------------------------
 
 func TestHealthEndpoints(t *testing.T) {
-	handler := HealthHandler(func() bool { return true })
+	handler := HealthHandler(func() bool { return true }, nil)
 
 	for _, path := range []string{"/healthz", "/readyz"} {
 		rec := httptest.NewRecorder()
@@ -266,7 +266,7 @@ func TestHealthEndpoints(t *testing.T) {
 }
 
 func TestReadyzReportsNotReady(t *testing.T) {
-	handler := HealthHandler(func() bool { return false })
+	handler := HealthHandler(func() bool { return false }, nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -279,7 +279,7 @@ func TestReadyzReportsNotReady(t *testing.T) {
 func TestHealthzIgnoresReadiness(t *testing.T) {
 	// Liveness must not fail because a dependency is down, or a key provider
 	// outage would restart every pod at once.
-	handler := HealthHandler(func() bool { return false })
+	handler := HealthHandler(func() bool { return false }, nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))

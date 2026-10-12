@@ -23,6 +23,8 @@ import (
 
 	"github.com/jatimprovcsirt/panda-docker/internal/config"
 	"github.com/jatimprovcsirt/panda-docker/internal/logging"
+	"github.com/jatimprovcsirt/panda-docker/internal/metrics"
+	"github.com/jatimprovcsirt/panda-docker/internal/ratelimit"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/rest"
 )
@@ -99,9 +101,28 @@ func run() int {
 func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 	ready := true
 
+	// Constructed here rather than in run() so the lifecycle owns everything
+	// that serves: a registry built earlier and passed through would be one
+	// more thing that could be wired to the wrong instance.
+	reg := metrics.New(service.SDKVersion(), string(cfg.Protocol), cfg.KeyProviderDriver)
+
+	limiter := ratelimit.New(cfg.RateLimitRPS, cfg.RateLimitBurst)
+	if cfg.RateLimitRPS <= 0 {
+		log.Warn("rate limiting is disabled (PANDA_RATE_LIMIT_RPS=0); " +
+			"every credential shares the service's full capacity")
+	}
+
+	var metricsHandler http.Handler
+	if cfg.MetricsEnabled {
+		metricsHandler = reg.Handler()
+	} else {
+		log.Warn("metrics are disabled (PANDA_METRICS_ENABLED=false); " +
+			"the unmask counter is the signal an anomalous bulk read would show up in")
+	}
+
 	healthSrv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.HealthPort),
-		Handler:           rest.HealthHandler(func() bool { return ready }),
+		Handler:           rest.HealthHandler(func() bool { return ready }, metricsHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -112,7 +133,7 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 	}
 	log.Info("authentication configured", "mode", string(cfg.AuthMode))
 
-	api, apiAddr, err := buildAPI(cfg, svc, authenticator, log)
+	api, apiAddr, err := buildAPI(cfg, svc, authenticator, reg, limiter, log)
 	if err != nil {
 		log.Error("could not build the API", "error", err)
 		return exitRefused

@@ -17,6 +17,8 @@ import (
 
 	"github.com/jatimprovcsirt/panda-docker/internal/apierr"
 	"github.com/jatimprovcsirt/panda-docker/internal/auth"
+	"github.com/jatimprovcsirt/panda-docker/internal/metrics"
+	"github.com/jatimprovcsirt/panda-docker/internal/ratelimit"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
 )
 
@@ -26,6 +28,8 @@ type Server struct {
 	log             *slog.Logger
 	maxRequestBytes int64
 	auth            *auth.Authenticator
+	metrics         *metrics.Registry
+	limiter         *ratelimit.Limiter
 }
 
 // Options configures a Server.
@@ -37,6 +41,11 @@ type Options struct {
 	// a permissive default — the failure mode of "auth not wired" must be a
 	// service that will not start, not one that serves everyone.
 	Authenticator *auth.Authenticator
+	// Metrics and Limiter are optional; nil means the corresponding feature
+	// is off. Neither is a security control, so a missing one degrades
+	// observability rather than protection.
+	Metrics *metrics.Registry
+	Limiter *ratelimit.Limiter
 }
 
 func New(opts Options) (*Server, error) {
@@ -57,6 +66,8 @@ func New(opts Options) (*Server, error) {
 		log:             opts.Logger,
 		maxRequestBytes: opts.MaxRequestBytes,
 		auth:            opts.Authenticator,
+		metrics:         opts.Metrics,
+		limiter:         opts.Limiter,
 	}, nil
 }
 
@@ -79,7 +90,7 @@ func (s *Server) Handler() http.Handler {
 	// parse errors uniformly.
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return s.recoverPanics(s.limitBody(s.authenticate(mux)))
+	return s.recoverPanics(s.limitBody(s.observe(s.authenticate(mux))))
 }
 
 // --- middleware ------------------------------------------------------------
@@ -258,11 +269,18 @@ func (s *Server) handleDecryptRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.svc.DecryptRaw(s.actorFrom(r), req.Envelope)
+	actor := s.actorFrom(r)
+	result, err := s.svc.DecryptRaw(actor, req.Envelope)
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
+
+	// Recorded only here, on the path that actually returned a full value.
+	// A masked read must never reach this line: if it did, the metric would
+	// report unmasking that never happened and the alert built on it would be
+	// worthless.
+	s.metrics.RecordUnmask(actor.APIKeyID)
 
 	s.writeJSON(w, http.StatusOK, decryptRawResponse{
 		Value:   result.Plaintext,
@@ -349,8 +367,16 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 //
 // Plain HTTP on a separate port, independent of the API protocol, so
 // Kubernetes probes work the same whether the instance serves REST or gRPC.
-func HealthHandler(ready func() bool) http.Handler {
+func HealthHandler(ready func() bool, metricsHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
+
+	// Metrics share the health port rather than the API port: they are
+	// operator-facing, and the API listener should carry nothing but the API.
+	// Serving them here also means they stay reachable regardless of which
+	// protocol the instance speaks.
+	if metricsHandler != nil {
+		mux.Handle("GET /metrics", metricsHandler)
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		// Liveness: the process is up. Deliberately says nothing about
