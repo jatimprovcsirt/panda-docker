@@ -68,8 +68,7 @@ jobs:
           sudo cp /tmp/cf/client.key "/etc/docker/certs.d/${HARBOR}/client.key"
           sudo chmod 600 "/etc/docker/certs.d/${HARBOR}/client.key"
 
-          say "cert bytes=$(wc -c < /tmp/cf/client.crt) key bytes=$(wc -c < /tmp/cf/client.key) \
-installed=[$(ls /etc/docker/certs.d/${HARBOR} 2>/dev/null | tr '\n' ' ')]"
+          say "cert bytes=$(wc -c < /tmp/cf/client.crt) key bytes=$(wc -c < /tmp/cf/client.key) installed=[$(ls /etc/docker/certs.d/${HARBOR} 2>/dev/null | tr '\n' ' ')]"
 
           echo "$HARBOR_PASSWORD" | docker login "$HARBOR" -u "$HARBOR_USERNAME" --password-stdin \
             > /tmp/cf/login.log 2>&1
