@@ -1,18 +1,22 @@
-name: Probe registry reachability
+name: Probe registry reachability and BuildKit push
 
-# TEMPORARY DIAGNOSTIC — delete once the questions below are answered.
+# TEMPORARY DIAGNOSTIC — delete once the question below is answered.
 #
 # Harbor sits behind Cloudflare, and a custom rule there rejects connections
 # from outside Indonesia. A GitHub-hosted runner (Azure, US) is refused with
 # 403 before Harbor sees the request — verified with no credentials, so it
 # was never an auth problem.
 #
-# The remedy is mutual TLS. curl-tested and working: without the certificate
-# the runner gets 403, with it the request reaches Harbor.
+# Mutual TLS is the remedy, and two things are now settled: curl reaches
+# Harbor with the certificate, and the Docker daemon does too (login and
+# pull both succeed once the certificate is in /etc/docker/certs.d/).
 #
-# What remains unproven is whether Docker uses that certificate, and whether
-# BuildKit — which runs in its own container and is what actually pushes —
-# can see it at all. Those are the two assumptions release.yml would rest on.
+# What is NOT settled: build-push-action pushes from BuildKit, which runs in
+# its own container, and that container cannot see the host's certs.d. A
+# successful login followed by a failed push is the confusing failure this
+# would produce. So: copy the certificate in and try an actual push.
+#
+# The push target is a throwaway repository, deleted in the same run.
 #
 # Answers are published as commit statuses; job logs need repository admin.
 #
@@ -30,6 +34,7 @@ permissions:
 
 env:
   HARBOR: harbor.jatimprov.go.id
+  SCRATCH_REPO: panda/probe-delete-me
 
 jobs:
   probe:
@@ -56,74 +61,27 @@ jobs:
           echo "cert and key written"
 
       - name: Install the certificate where Docker looks for it
-        # Docker reads client certificates from /etc/docker/certs.d/<host>/,
-        # not from a flag. This is the whole reason the earlier curl success
-        # does not carry over on its own.
         run: |
           set -uo pipefail
           sudo mkdir -p "/etc/docker/certs.d/${HARBOR}"
           sudo cp /tmp/cf/client.crt "/etc/docker/certs.d/${HARBOR}/client.cert"
           sudo cp /tmp/cf/client.key "/etc/docker/certs.d/${HARBOR}/client.key"
           sudo chmod 600 "/etc/docker/certs.d/${HARBOR}/client.key"
-          ls -l "/etc/docker/certs.d/${HARBOR}"
 
-      - name: Does docker login work
+      - name: Log in
         env:
-          GH_TOKEN: ${{ github.token }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
           set -uo pipefail
+          echo "$HARBOR_PASSWORD" | docker login "$HARBOR" -u "$HARBOR_USERNAME" --password-stdin
 
-          if echo "$HARBOR_PASSWORD" | docker login "$HARBOR" \
-               -u "$HARBOR_USERNAME" --password-stdin >/tmp/cf/login.log 2>&1; then
-            result="ok"
-          else
-            result="FAIL"
-          fi
-
-          # The message is safe to publish: it is a registry status line, and
-          # GitHub has already masked the credential out of it.
-          detail=$(tail -2 /tmp/cf/login.log | tr '\n' ' ' | tr -s ' ')
-          echo "docker login: $result :: $detail"
-
-          curl -s -o /dev/null -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"docker-login",description:("login="+process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
-
-      - name: Does the daemon pull through the certificate
+      - name: Copy the certificate into BuildKit and push a throwaway image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
 
-          # A read. Pulling proves the daemon used the certificate, without
-          # writing anything to the registry.
-          if docker pull "${HARBOR}/panda/panda-docker:0.1.0" >/tmp/cf/pull.log 2>&1; then
-            result="ok"
-          else
-            result="FAIL"
-          fi
-          detail=$(tail -2 /tmp/cf/pull.log | tr '\n' ' ' | tr -s ' ' | head -c 90)
-          echo "docker pull: $result :: $detail"
-
-          curl -s -o /dev/null -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"docker-pull",description:("pull="+process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
-
-      - name: Can BuildKit see the certificate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -uo pipefail
-
-          # The question release.yml depends on. build-push-action uses the
-          # docker-container driver, so BuildKit runs in its own container
-          # with its own filesystem — and BuildKit is what pushes.
           docker buildx create --name probe --driver docker-container --use >/dev/null 2>&1
           docker buildx inspect --bootstrap >/dev/null 2>&1
 
@@ -131,14 +89,50 @@ jobs:
           if [ -z "$bk" ]; then
             result="no-buildkit-container"
           else
-            seen=$(docker exec "$bk" sh -c "ls /etc/docker/certs.d/${HARBOR} 2>/dev/null | tr '\n' ','" 2>/dev/null)
-            if [ -n "$seen" ]; then result="visible:${seen}"; else result="NOT-visible"; fi
+            # The question, stated directly: does BuildKit's resolver read
+            # client certificates from its own /etc/docker/certs.d?
+            docker exec "$bk" mkdir -p "/etc/docker/certs.d/${HARBOR}" 2>/dev/null
+            docker cp /tmp/cf/client.crt "$bk:/etc/docker/certs.d/${HARBOR}/client.cert"
+            docker cp /tmp/cf/client.key "$bk:/etc/docker/certs.d/${HARBOR}/client.key"
+
+            mkdir -p /tmp/scratch
+            printf 'FROM scratch\nCOPY probe.txt /probe.txt\n' > /tmp/scratch/Dockerfile
+            echo probe > /tmp/scratch/probe.txt
+
+            if docker buildx build \
+                 --platform linux/amd64,linux/arm64 \
+                 -t "${HARBOR}/${SCRATCH_REPO}:buildkit" \
+                 --push /tmp/scratch >/tmp/cf/bk.log 2>&1; then
+              result="PUSH-OK"
+            else
+              result="push-failed"
+            fi
           fi
 
-          echo "buildkit cert visibility: $result"
+          detail=$(tail -3 /tmp/cf/bk.log 2>/dev/null | tr '\n' ' ' | tr -s ' ' | head -c 80)
+          echo "buildkit push: $result :: $detail"
 
           curl -s -o /dev/null -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"buildkit-cert",description:process.argv[1].slice(0,140)}))' "$result")"
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"buildkit-push",description:(process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
+
+      - name: Remove the throwaway repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -uo pipefail
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+            -u "${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
+            "https://${HARBOR}/api/v2.0/projects/panda/repositories/${SCRATCH_REPO#panda/}")
+          echo "cleanup status: $code"
+
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cleanup",description:("delete "+process.argv[1]).slice(0,140)}))' "$code")"
