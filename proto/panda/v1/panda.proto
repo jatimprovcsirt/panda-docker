@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package panda.v1;
+
+option go_package = "github.com/jatimprovcsirt/panda-docker/gen/panda/v1;pandav1";
+
+// PandaService exposes PANDA's field-level encryption over gRPC.
+//
+// It is the same operation set as the REST transport, defined once here and
+// implemented once in internal/service. A client should be able to move
+// between the two without changing anything but the transport.
+service PandaService {
+  // Encrypt a plaintext value.
+  rpc Encrypt(EncryptRequest) returns (EncryptResponse);
+
+  // Decrypt and mask. This is the default read path.
+  rpc Decrypt(DecryptRequest) returns (DecryptResponse);
+
+  // Decrypt without masking.
+  //
+  // Separate from Decrypt rather than a flag on it, because every call here
+  // exposes a citizen's data to whatever happens next — and a boolean argument
+  // is exactly the kind of thing that gets flipped without anyone noticing in
+  // review.
+  rpc DecryptRaw(DecryptRawRequest) returns (DecryptRawResponse);
+
+  // Apply PANDA's masking to a plaintext the caller already holds.
+  rpc Mask(MaskRequest) returns (MaskResponse);
+
+  // Compute the deterministic index used for exact-match lookup.
+  rpc BlindIndex(BlindIndexRequest) returns (BlindIndexResponse);
+
+  // Report what this instance is running.
+  rpc Version(VersionRequest) returns (VersionResponse);
+}
+
+// NOTE ON THE ENVELOPE, and why it is a string.
+//
+// Every message below carries the envelope as a JSON string rather than as a
+// decomposed message with `nonce`, `ciphertext`, and `kid` fields.
+//
+// That is deliberate. The envelope is a versioned wire format owned by
+// panda-spec; mirroring its fields into protobuf would create a second schema
+// that can drift from the first, and it would break the moment envelope v2
+// adds a field — the proto would silently drop it, and the server would return
+// an envelope missing a field the SDKs expect.
+//
+// A string field keeps panda-spec the single definition of what an envelope is,
+// and makes the gRPC path byte-compatible with the REST path by construction
+// rather than by review. If you are here to "fix" this by expanding the
+// fields: that is the change this comment exists to prevent.
+
+message EncryptRequest {
+  string plaintext = 1;
+  // Optional. Omitted means the provider's default key id.
+  string kid = 2;
+}
+
+message EncryptResponse {
+  // The PANDA envelope, as JSON. Store this value as-is.
+  string envelope = 1;
+  string kid = 2;
+  int32 v = 3;
+}
+
+message DecryptRequest {
+  string envelope = 1;
+}
+
+message DecryptResponse {
+  // The masked value, for example "32************01".
+  string value = 1;
+  bool masked = 2;
+  string kid = 3;
+}
+
+message DecryptRawRequest {
+  string envelope = 1;
+}
+
+message DecryptRawResponse {
+  string value = 1;
+  bool masked = 2;
+  string kid = 3;
+  // Correlates this call with the server's audit record. Returned so a caller
+  // can tie its own log to the audit trail without a second lookup.
+  string audit_id = 4;
+}
+
+message MaskRequest {
+  string value = 1;
+}
+
+message MaskResponse {
+  string value = 1;
+}
+
+message BlindIndexRequest {
+  string value = 1;
+  string kid = 2;
+}
+
+message BlindIndexResponse {
+  string index = 1;
+  string kid = 2;
+}
+
+message VersionRequest {}
+
+message VersionResponse {
+  string service = 1;
+  string sdk = 2;
+}
+
+// ErrorDetail carries the service's own error code as a gRPC status detail.
+//
+// gRPC status codes are coarser than this service's contract: `auth_failed`
+// and `malformed_envelope` are both InvalidArgument, and a caller that needs
+// to tell them apart would otherwise have to parse the message string. This
+// lets a client key off the same code it would see in a REST error body, so
+// switching transports does not change error handling.
+message ErrorDetail {
+  string code = 1;
+}

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -104,9 +105,9 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	apiHandler, apiAddr, err := buildAPI(cfg, svc, log)
+	api, apiAddr, err := buildAPI(cfg, svc, log)
 	if err != nil {
-		log.Error("could not build the API handler", "error", err)
+		log.Error("could not build the API", "error", err)
 		return exitRefused
 	}
 
@@ -122,13 +123,13 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 			"Do not expose this instance outside an isolated network until the hardening phase lands.")
 	}
 
-	apiSrv := &http.Server{
-		Addr:              apiAddr,
-		Handler:           apiHandler,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       cfg.RequestTimeout,
-		WriteTimeout:      cfg.RequestTimeout,
-		IdleTimeout:       120 * time.Second,
+	// net.Listen is called here rather than letting the server bind, so a
+	// port that is already taken is reported as a startup failure rather than
+	// as a listener error arriving after the process has claimed to start.
+	ln, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		log.Error("could not bind the API listener", "addr", apiAddr, "error", err)
+		return exitFailure
 	}
 
 	errCh := make(chan error, 2)
@@ -141,8 +142,8 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 	}()
 
 	go func() {
-		log.Info("api listener bound", "addr", apiSrv.Addr, "protocol", string(cfg.Protocol))
-		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Info("api listener bound", "addr", apiAddr, "protocol", string(cfg.Protocol))
+		if err := api.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("api listener: %w", err)
 		}
 	}()
@@ -165,7 +166,7 @@ func serve(cfg *config.Config, svc *service.Service, log *slogLogger) int {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 
-	if err := apiSrv.Shutdown(ctx); err != nil {
+	if err := api.Shutdown(ctx); err != nil {
 		log.Error("api listener did not drain in time", "error", err)
 	}
 	if err := healthSrv.Shutdown(ctx); err != nil {

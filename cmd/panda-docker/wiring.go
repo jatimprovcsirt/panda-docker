@@ -1,22 +1,68 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
+
 	"github.com/jatimprovcsirt/panda-go/crypto"
 
+	pandav1 "github.com/jatimprovcsirt/panda-docker/gen/panda/v1"
 	"github.com/jatimprovcsirt/panda-docker/internal/config"
 	"github.com/jatimprovcsirt/panda-docker/internal/service"
+	"github.com/jatimprovcsirt/panda-docker/internal/transport/grpctransport"
 	"github.com/jatimprovcsirt/panda-docker/internal/transport/rest"
 )
+
+// apiServer is what serve() drives, whichever protocol is active.
+//
+// Introduced because grpc.Server and http.Server agree on Serve but not on
+// shutdown — grpc has GracefulStop, http has Shutdown(ctx). A small interface
+// with an adapter is cheaper than branching inside the lifecycle code, where
+// the two paths would drift.
+type apiServer interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+}
+
+// grpcLifecycle adapts *grpc.Server to apiServer.
+type grpcLifecycle struct{ srv *grpc.Server }
+
+func (g grpcLifecycle) Serve(ln net.Listener) error { return g.srv.Serve(ln) }
+
+func (g grpcLifecycle) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		// GracefulStop waits for in-flight RPCs, which is what a rolling
+		// update needs: a decrypt in progress must finish rather than be cut
+		// off mid-response.
+		g.srv.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// The grace period expired. Stop forcibly rather than hanging the
+		// pod past its termination deadline.
+		g.srv.Stop()
+		return ctx.Err()
+	}
+}
 
 type slogLogger = slog.Logger
 
@@ -25,7 +71,7 @@ type slogLogger = slog.Logger
 // The inactive protocol is not built at all. It would be easy to construct
 // both and bind one, but then a future change that binds the wrong one is a
 // silent exposure rather than a compile-time absence.
-func buildAPI(cfg *config.Config, svc *service.Service, log *slog.Logger) (http.Handler, string, error) {
+func buildAPI(cfg *config.Config, svc *service.Service, log *slog.Logger) (apiServer, string, error) {
 	switch cfg.Protocol {
 	case config.ProtocolREST:
 		srv, err := rest.New(rest.Options{
@@ -36,16 +82,42 @@ func buildAPI(cfg *config.Config, svc *service.Service, log *slog.Logger) (http.
 		if err != nil {
 			return nil, "", err
 		}
-		return srv.Handler(), fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.RESTPort), nil
+		return &http.Server{
+			Handler:           srv.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       cfg.RequestTimeout,
+			WriteTimeout:      cfg.RequestTimeout,
+			IdleTimeout:       120 * time.Second,
+		}, fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.RESTPort), nil
 
 	case config.ProtocolGRPC:
-		// Phase 2. Refusing here rather than falling back to REST is the point:
-		// an operator who asked for gRPC and silently got REST would have
-		// opened the wrong port and be none the wiser.
-		return nil, "", errors.New(
-			"PANDA_API_PROTOCOL=grpc is not implemented yet; the gRPC transport lands in Phase 2. " +
-				"Set PANDA_API_PROTOCOL=rest or wait for the release that includes it",
+		handler, err := grpctransport.New(svc, log)
+		if err != nil {
+			return nil, "", err
+		}
+
+		grpcSrv := grpc.NewServer(
+			grpc.ChainUnaryInterceptor(grpctransport.RecoverInterceptor(log)),
 		)
+		pandav1.RegisterPandaServiceServer(grpcSrv, handler)
+
+		// The standard health service, so Kubernetes can use a native gRPC
+		// probe instead of an HTTP shim that only works for one protocol.
+		healthSrv := health.NewServer()
+		healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+		healthpb.RegisterHealthServer(grpcSrv, healthSrv)
+
+		// Reflection lets grpcurl work without a local copy of the proto.
+		// Off by default because it also lets anyone enumerate the API, which
+		// is a convenience in development and a small disclosure in
+		// production.
+		if cfg.GRPCReflection {
+			reflection.Register(grpcSrv)
+		} else {
+			log.Info("gRPC reflection is disabled; set PANDA_GRPC_REFLECTION=true for grpcurl")
+		}
+
+		return grpcLifecycle{srv: grpcSrv}, fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.GRPCPort), nil
 	}
 
 	return nil, "", fmt.Errorf("unhandled protocol %q", cfg.Protocol)

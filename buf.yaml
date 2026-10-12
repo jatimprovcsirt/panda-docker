@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  # The service is named PandaService and its package is panda.v1, matching
+  # the SDK's other artifacts. Renaming to satisfy a suffix convention would
+  # make the gRPC surface disagree with everything else that names PANDA.
+  except:
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE
