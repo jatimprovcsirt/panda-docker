@@ -1,19 +1,20 @@
 name: Probe registry reachability
 
-# TEMPORARY DIAGNOSTIC — delete once the question below is answered.
+# TEMPORARY DIAGNOSTIC — delete once the questions below are answered.
 #
 # Harbor sits behind Cloudflare, and a custom rule there rejects connections
 # from outside Indonesia. A GitHub-hosted runner (Azure, US) is refused with
-# 403 before Harbor sees the request at all — verified with no credentials
-# involved, so it was never an auth problem.
+# 403 before Harbor sees the request — verified with no credentials, so it
+# was never an auth problem.
 #
-# The chosen remedy is mutual TLS: a Cloudflare client certificate that a
-# rule can key off, instead of allowlisting 7,036 shared Azure ranges that
-# any GitHub account can obtain.
+# The remedy is mutual TLS. curl-tested and working: without the certificate
+# the runner gets 403, with it the request reaches Harbor.
 #
-# This asks whether that actually works before the release workflow is
-# changed to depend on it. The answer is published as a commit status,
-# because job logs need repository admin to read.
+# What remains unproven is whether Docker uses that certificate, and whether
+# BuildKit — which runs in its own container and is what actually pushes —
+# can see it at all. Those are the two assumptions release.yml would rest on.
+#
+# Answers are published as commit statuses; job logs need repository admin.
 #
 # Path-filtered to itself so it does not run on unrelated pushes.
 
@@ -27,13 +28,14 @@ permissions:
   contents: read
   statuses: write
 
+env:
+  HARBOR: harbor.jatimprov.go.id
+
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
       - name: Materialise the client certificate
-        # CRLF would make OpenSSL reject the PEM with a parse error that
-        # reads like a wrong certificate rather than a stray carriage return.
         env:
           CLIENT_CERT: ${{ secrets.CLOUDFLARE_CLIENT_CERT }}
           CLIENT_KEY: ${{ secrets.CLOUDFLARE_CLIENT_KEY }}
@@ -46,65 +48,97 @@ jobs:
             exit 0
           fi
 
+          # CRLF would make OpenSSL reject the PEM with a parse error that
+          # reads like a wrong certificate rather than a stray carriage return.
           printf '%s\n' "$CLIENT_CERT" | tr -d '\r' > /tmp/cf/client.crt
           printf '%s\n' "$CLIENT_KEY"  | tr -d '\r' > /tmp/cf/client.key
           chmod 600 /tmp/cf/client.key
+          echo "cert and key written"
 
-          echo "cert bytes: $(wc -c < /tmp/cf/client.crt), key bytes: $(wc -c < /tmp/cf/client.key)"
-          echo "cert header: $(head -1 /tmp/cf/client.crt)"
-          echo "key header:  $(head -1 /tmp/cf/client.key)"
-
-      - name: Certificate metadata
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Install the certificate where Docker looks for it
+        # Docker reads client certificates from /etc/docker/certs.d/<host>/,
+        # not from a flag. This is the whole reason the earlier curl success
+        # does not carry over on its own.
         run: |
           set -uo pipefail
-          if [ ! -s /tmp/cf/client.crt ]; then echo "no cert"; exit 0; fi
+          sudo mkdir -p "/etc/docker/certs.d/${HARBOR}"
+          sudo cp /tmp/cf/client.crt "/etc/docker/certs.d/${HARBOR}/client.cert"
+          sudo cp /tmp/cf/client.key "/etc/docker/certs.d/${HARBOR}/client.key"
+          sudo chmod 600 "/etc/docker/certs.d/${HARBOR}/client.key"
+          ls -l "/etc/docker/certs.d/${HARBOR}"
 
-          subject=$(openssl x509 -in /tmp/cf/client.crt -noout -subject 2>&1 | sed 's/^subject=//' | tr -d '\r')
-          notafter=$(openssl x509 -in /tmp/cf/client.crt -noout -enddate 2>&1 | sed 's/^notAfter=//')
-          match=$(openssl x509 -in /tmp/cf/client.crt -noout -pubkey 2>/dev/null | openssl md5 | awk '{print $2}')
-          keymatch=$(openssl pkey -in /tmp/cf/client.key -pubout 2>/dev/null | openssl md5 | awk '{print $2}')
+      - name: Does docker login work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -uo pipefail
 
-          pair="MISMATCH"
-          [ -n "$match" ] && [ "$match" = "$keymatch" ] && pair="ok"
+          if echo "$HARBOR_PASSWORD" | docker login "$HARBOR" \
+               -u "$HARBOR_USERNAME" --password-stdin >/tmp/cf/login.log 2>&1; then
+            result="ok"
+          else
+            result="FAIL"
+          fi
 
-          echo "subject : $subject"
-          echo "expires : $notafter"
-          echo "keypair : $pair"
+          # The message is safe to publish: it is a registry status line, and
+          # GitHub has already masked the credential out of it.
+          detail=$(tail -2 /tmp/cf/login.log | tr '\n' ' ' | tr -s ' ')
+          echo "docker login: $result :: $detail"
 
-          desc="subj=${subject:0:45} exp=${notafter} pair=${pair}"
           curl -s -o /dev/null -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cf-cert",description:process.argv[1].slice(0,140)}))' "$desc")"
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"docker-login",description:("login="+process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
 
-      - name: Does the certificate change the answer
+      - name: Does the daemon pull through the certificate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
 
-          plain=$(curl -s -o /dev/null -w '%{http_code}' https://harbor.jatimprov.go.id/v2/)
+          # A read. Pulling proves the daemon used the certificate, without
+          # writing anything to the registry.
+          if docker pull "${HARBOR}/panda/panda-docker:0.1.0" >/tmp/cf/pull.log 2>&1; then
+            result="ok"
+          else
+            result="FAIL"
+          fi
+          detail=$(tail -2 /tmp/cf/pull.log | tr '\n' ' ' | tr -s ' ' | head -c 90)
+          echo "docker pull: $result :: $detail"
 
-          certv2=$(curl -s -o /dev/null -w '%{http_code}' \
-            --cert /tmp/cf/client.crt --key /tmp/cf/client.key \
-            https://harbor.jatimprov.go.id/v2/ 2>/tmp/cf/err) || true
-          certerr=$(head -c 60 /tmp/cf/err | tr '\n' ' ')
-
-          # The token endpoint is the half that matters for `docker login`:
-          # Docker talks to it separately from the registry, and support for
-          # client certificates there is the assumption being tested.
-          certtok=$(curl -s -o /dev/null -w '%{http_code}' \
-            --cert /tmp/cf/client.crt --key /tmp/cf/client.key \
-            "https://harbor.jatimprov.go.id/service/token?service=harbor-registry&scope=repository:panda/panda-docker:pull,push" 2>/dev/null) || true
-
-          echo "plain=${plain} certv2=${certv2} certtoken=${certtok} err=${certerr}"
-
-          desc="plain=${plain} certv2=${certv2} certtoken=${certtok} ${certerr}"
           curl -s -o /dev/null -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"cf-mtls",description:process.argv[1].slice(0,140)}))' "$desc")"
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"docker-pull",description:("pull="+process.argv[1]+" "+process.argv[2]).slice(0,140)}))' "$result" "$detail")"
+
+      - name: Can BuildKit see the certificate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+
+          # The question release.yml depends on. build-push-action uses the
+          # docker-container driver, so BuildKit runs in its own container
+          # with its own filesystem — and BuildKit is what pushes.
+          docker buildx create --name probe --driver docker-container --use >/dev/null 2>&1
+          docker buildx inspect --bootstrap >/dev/null 2>&1
+
+          bk=$(docker ps --filter "name=buildx_buildkit_probe" --format '{{.Names}}' | head -1)
+          if [ -z "$bk" ]; then
+            result="no-buildkit-container"
+          else
+            seen=$(docker exec "$bk" sh -c "ls /etc/docker/certs.d/${HARBOR} 2>/dev/null | tr '\n' ','" 2>/dev/null)
+            if [ -n "$seen" ]; then result="visible:${seen}"; else result="NOT-visible"; fi
+          fi
+
+          echo "buildkit cert visibility: $result"
+
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(node -e 'process.stdout.write(JSON.stringify({state:"success",context:"buildkit-cert",description:process.argv[1].slice(0,140)}))' "$result")"
