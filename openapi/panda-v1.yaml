@@ -333,7 +333,18 @@ paths:
                 properties:
                   index:
                     type: string
-                    description: Lowercase hex. Store in a `VARCHAR(64)`.
+                    description: |
+                      Base64 of a 32-byte digest, so 44 characters ending in
+                      `=`. Store it in a `VARCHAR(64)`: it fits with room to
+                      spare, and the column must never be sized to the
+                      plaintext.
+
+                      All four SDKs produce this same encoding, so an index
+                      written by one is found by another.
+
+                      It is not hex. An earlier version of this document said
+                      it was, and an application that validated the format
+                      accordingly would have rejected every valid index.
                   kid: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
