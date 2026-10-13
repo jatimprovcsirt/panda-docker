@@ -34,6 +34,13 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      # Repeated here rather than trusted from CI. A tag can point at any
+      # commit, including one whose CI never ran to completion, and shipping
+      # a collection that contradicts the specification is worse than
+      # shipping none.
+      - name: Check the collection matches the specification
+        run: node scripts/check-collection-spec.js
+
       - run: go vet ./...
       - run: go test -race ./...
 
@@ -264,3 +271,8 @@ jobs:
             panda-docker-*.tar
             panda-docker-*.tar.sha256
             panda-docker-*.spdx.json
+            # Published under their own names at a stable address, so the
+            # portal can link to `releases/latest/download/<name>` once and
+            # stay correct across every future release.
+            postman/panda.postman_collection.json
+            postman/panda.postman_environment.json

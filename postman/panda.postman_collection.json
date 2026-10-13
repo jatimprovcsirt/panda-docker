@@ -1,0 +1,394 @@
+{
+  "info": {
+    "_postman_id": "7c1f4a2e-panda-docker-v1",
+    "name": "PANDA Docker API",
+    "description": "Field-level encryption for personal data, over HTTP.\n\n## Before you start\n\nImport the environment template next to this collection, then set:\n\n- `baseUrl` — your own PANDA deployment. There is no shared public endpoint; every agency runs its own instance.\n- `apiKey` — a key issued by that deployment, prefixed `panda_svc_`. Mark it as a **secret** variable type in Postman so it does not appear on screen during a demo or a screenshot.\n\nIf the deployment runs with `PANDA_AUTH_MODE=mtls+apikey` — the production default — you also need a client certificate. Postman takes that under **Settings → Certificates**, with the host set to your `baseUrl` host. Without it the connection is refused before the API key is ever read.\n\n## Running the requests in order\n\n`Encrypt` stores the envelope it receives, and the decrypt requests read it back. Running the collection top to bottom walks the whole round trip and leaves you with a working example of each call. Running a decrypt request on its own will fail, because nothing has been encrypted yet in this session.\n\n## Masking is the default\n\n`Decrypt` returns a masked value such as `32************01` — safe to put in an API response or a log line. Reading the full plaintext is `Decrypt to the full plaintext`, which requires the `unmask` scope and is audited on every call. When its test fails with 403, the credential does not hold that scope; that is the intended answer, not a defect.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiKey}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "kid",
+      "value": "opd-key-1",
+      "type": "string"
+    },
+    {
+      "key": "plaintext",
+      "value": "3201012501990001",
+      "type": "string"
+    },
+    {
+      "key": "envelope",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "envelopeJson",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Version",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "// Reachable without credentials on purpose: an operator debugging a",
+                  "// deployment needs to ask what is running before they can authenticate",
+                  "// against it.",
+                  "pm.test('reports the service and the SDK it links against', () => {",
+                  "  pm.expect(body.service).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.sdk).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/version",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "version"]
+            },
+            "description": "What this instance is running. No credentials required, deliberately — an operator debugging a deployment needs to be able to ask what is running before they can authenticate against it."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Encryption",
+      "item": [
+        {
+          "name": "Encrypt",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('an envelope is returned', () => {",
+                  "  pm.expect(body.envelope).to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "// The wire format is fixed by panda-spec, and every SDK reads it.",
+                  "// Asserting the shape here is what turns this from documentation into",
+                  "// a contract test: a change that breaks interoperability fails now,",
+                  "// rather than in an agency's PHP application six months from now.",
+                  "pm.test('the envelope is PANDA v1', () => {",
+                  "  const env = JSON.parse(body.envelope);",
+                  "  pm.expect(env.v).to.eql(1);",
+                  "  pm.expect(env.alg).to.eql('aes-256-gcm');",
+                  "  pm.expect(env.kid).to.be.a('string').and.not.empty;",
+                  "  pm.expect(env.nonce).to.be.a('string').and.not.empty;",
+                  "  pm.expect(env.ciphertext).to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('the envelope does not contain the plaintext', () => {",
+                  "  pm.expect(body.envelope).to.not.include(pm.variables.replaceIn('{{plaintext}}'));",
+                  "});",
+                  "",
+                  "// Kept in two forms on purpose. `envelopeJson` is the JSON-escaped",
+                  "// string, ready to drop into a request body without its quotes",
+                  "// breaking the surrounding JSON; `envelope` is the readable original.",
+                  "pm.collectionVariables.set('envelope', body.envelope);",
+                  "pm.collectionVariables.set('envelopeJson', JSON.stringify(body.envelope));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plaintext\": \"{{plaintext}}\",\n  \"kid\": \"{{kid}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/encrypt",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "encrypt"]
+            },
+            "description": "Produces a PANDA envelope — a JSON string holding the ciphertext and the metadata needed to read it back.\n\nStore it as-is in a `TEXT` column. Do not parse it, and do not size the column for the plaintext: an envelope is roughly 1.34x the plaintext plus about 130 characters of JSON and nonce overhead.\n\n## `kid` is required in practice\n\nSet `kid` in your environment to a key your deployment holds. Omitting it does **not** fall back to a default: the service answers `unknown_kid`, because the key provider resolves a key only from the identifier it is given. The OpenAPI document currently describes the opposite — that is a known discrepancy, recorded rather than papered over here.\n\nNaming the key explicitly is worth doing anyway. It is what makes rotation possible later without re-encrypting everything."
+          }
+        },
+        {
+          "name": "Malformed envelope is refused",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 returned', () => pm.response.to.have.status(400));",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "// Key error handling off error.code, never off the HTTP status: the",
+                  "// status is transport decoration, and the same code arrives over gRPC",
+                  "// as a status detail.",
+                  "pm.test('the error code is stable and specific', () => {",
+                  "  pm.expect(body.error.code).to.eql('malformed_envelope');",
+                  "});",
+                  "",
+                  "pm.test('the message carries no plaintext or key material', () => {",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.error.message).to.not.include('3201012501990001');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"envelope\": \"not-a-panda-envelope\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/decrypt",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "decrypt"]
+            },
+            "description": "What a caller sees when a column truncated the envelope, or when something that is not an envelope reached the endpoint.\n\nA truncated envelope is the most common cause in practice: a `VARCHAR` sized for the plaintext silently cuts the JSON, and the failure surfaces here rather than at insert time."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Decryption",
+      "item": [
+        {
+          "name": "Decrypt (masked)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "const plaintext = pm.variables.replaceIn('{{plaintext}}');",
+                  "",
+                  "pm.test('the response is marked as masked', () => {",
+                  "  pm.expect(body.masked).to.eql(true);",
+                  "});",
+                  "",
+                  "// Asserted by shape rather than by exact value, so this keeps passing",
+                  "// when someone changes the sample plaintext in their environment.",
+                  "pm.test('only the first two and last two characters are readable', () => {",
+                  "  pm.expect(body.value.slice(0, 2)).to.eql(plaintext.slice(0, 2));",
+                  "  pm.expect(body.value.slice(-2)).to.eql(plaintext.slice(-2));",
+                  "  pm.expect(body.value).to.include('*');",
+                  "});",
+                  "",
+                  "pm.test('the masked value keeps the length of the original', () => {",
+                  "  pm.expect(body.value).to.have.lengthOf(plaintext.length);",
+                  "});",
+                  "",
+                  "pm.test('the full plaintext is nowhere in the response', () => {",
+                  "  pm.expect(pm.response.text()).to.not.include(plaintext);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"envelope\": {{envelopeJson}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/decrypt",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "decrypt"]
+            },
+            "description": "The read path for almost every caller. The masked value is safe to return in an API response, write to a log, or display in a frontend without further protection.\n\nRun `Encrypt` first in the same session — this reads the envelope it stored."
+          }
+        },
+        {
+          "name": "Decrypt to the full plaintext",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// 403 here is a correct answer, not a broken request: the credential",
+                  "// does not hold the `unmask` scope. Ask for the scope rather than",
+                  "// reaching for a different credential.",
+                  "if (pm.response.code === 403) {",
+                  "  pm.test('refused: this credential does not hold the unmask scope', () => {",
+                  "    pm.expect(pm.response.json().error.code).to.eql('forbidden');",
+                  "  });",
+                  "  return;",
+                  "}",
+                  "",
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "const plaintext = pm.variables.replaceIn('{{plaintext}}');",
+                  "",
+                  "pm.test('the full plaintext is returned', () => {",
+                  "  pm.expect(body.masked).to.eql(false);",
+                  "  pm.expect(body.value).to.eql(plaintext);",
+                  "});",
+                  "",
+                  "// What answers \"who read this citizen's data, and when\" during an",
+                  "// audit. Log it alongside your own request id.",
+                  "pm.test('an audit id is returned', () => {",
+                  "  pm.expect(body.audit_id).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"envelope\": {{envelopeJson}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/decrypt/raw",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "decrypt", "raw"]
+            },
+            "description": "Returns the original value. Requires the `unmask` scope, and every call is recorded in the audit log with the caller's API key id and certificate Common Name.\n\nBefore reaching for this, consider whether you need to:\n\n- **Display a value?** Use `Decrypt (masked)`. The masked form is usually what the screen should show anyway.\n- **Look a record up by value?** Use `Blind index`. That never decrypts anything.\n- **Export data?** Ask whether the export needs full values or whether masked ones serve.\n\nIf the answer is still yes, this is the right endpoint — and the audit record is how you show the decision was deliberate."
+          }
+        },
+        {
+          "name": "Mask a value you already hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "const plaintext = pm.variables.replaceIn('{{plaintext}}');",
+                  "",
+                  "pm.test('masking matches what decryption returns', () => {",
+                  "  pm.expect(body.value.slice(0, 2)).to.eql(plaintext.slice(0, 2));",
+                  "  pm.expect(body.value.slice(-2)).to.eql(plaintext.slice(-2));",
+                  "  pm.expect(body.value).to.include('*');",
+                  "});",
+                  "",
+                  "pm.test('the masked value keeps the length of the original', () => {",
+                  "  pm.expect(body.value).to.have.lengthOf(plaintext.length);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"value\": \"{{plaintext}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/mask",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "mask"]
+            },
+            "description": "Applies PANDA's masking to a plaintext you already have, with no encryption involved.\n\nFor an import pipeline, a report, or a migration that holds plaintext from somewhere else and needs the same masking the service would apply on a read."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "item": [
+        {
+          "name": "Blind index",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 returned', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "// Base64 of a 32-byte digest, so 44 characters ending in '='.",
+                  "// Always the same width — a value of another length means the",
+                  "// column truncated it on insert, and it will never match on lookup.",
+                  "//",
+                  "// The OpenAPI document describes this as lowercase hex in a",
+                  "// VARCHAR(64). That is not what the service returns. Recorded here",
+                  "// rather than smoothed over, because an agency sizing a column or",
+                  "// validating the format from the document would be working from",
+                  "// something untrue.",
+                  "pm.test('the index is base64 of a 32-byte digest', () => {",
+                  "  pm.expect(body.index).to.have.lengthOf(44);",
+                  "  pm.expect(body.index).to.match(/^[A-Za-z0-9+/]{43}=$/);",
+                  "});",
+                  "",
+                  "pm.test('the index does not contain the value', () => {",
+                  "  pm.expect(body.index).to.not.include(pm.variables.replaceIn('{{plaintext}}'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"value\": \"{{plaintext}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/blind-index",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "blind-index"]
+            },
+            "description": "A deterministic HMAC index for a value, so a record can be found by exact match without decrypting anything.\n\nStore it in a separate column — conventionally `<field>_bidx` — and query that column:\n\n```sql\nSELECT * FROM citizens WHERE nik_bidx = $1;\n```\n\n## The index is immutable\n\nIt is derived from the value and the index key. Changing the key means re-indexing every row, and rows indexed under a different key will never match. Decide the key before the first row is written.\n\n## What it leaks\n\nThe index is deterministic: two rows with the same value have the same index. For a NIK that reveals almost nothing, because the value is unique anyway. For a low-cardinality field it reveals almost everything — an index on blood type across ten thousand rows is a list of blood types, even though the encrypted column beside it is not. Do not blind-index demographic fields; UU PDP treats religion, gender, marital status and blood type as sensitive on their own."
+          }
+        }
+      ]
+    }
+  ]
+}

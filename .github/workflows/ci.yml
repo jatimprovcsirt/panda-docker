@@ -29,6 +29,12 @@ jobs:
             exit 1
           fi
 
+      # The Postman collection ships to agencies and the OpenAPI document is
+      # what the portal renders. A path added to one and forgotten in the
+      # other is invisible until somebody tries to call it.
+      - name: Check the collection matches the specification
+        run: node scripts/check-collection-spec.js
+
       - run: go vet ./...
 
       # The interop tests skip themselves when the sibling SDK repositories are
@@ -85,3 +91,12 @@ jobs:
         run: |
           chmod +x scripts/smoke.sh
           scripts/smoke.sh panda-docker:ci
+
+      # Runs the published collection against a real container. The static
+      # check above proves the collection names the right endpoints; this
+      # proves the requests in it actually work — status codes, response
+      # shapes, masking behaviour and error codes included.
+      - name: Contract test the API
+        run: |
+          chmod +x scripts/contract.sh
+          scripts/contract.sh panda-docker:ci
