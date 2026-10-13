@@ -34,6 +34,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: panda-docker
+          # A version tag — not `latest`, and not a digest. A tag is only as
+          # trustworthy as Harbor's Tag Immutability policy for this project:
+          # without that policy it can be repointed at a different image, and
+          # nothing here would show it. The README covers pinning the digest
+          # instead, and how to verify the build provenance.
           image: harbor.jatimprov.go.id/panda/panda-docker:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
