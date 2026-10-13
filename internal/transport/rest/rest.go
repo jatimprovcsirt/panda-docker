@@ -315,11 +315,21 @@ func (s *Server) handleMask(w http.ResponseWriter, r *http.Request) {
 type blindIndexRequest struct {
 	Value string `json:"value"`
 	KID   string `json:"kid"`
+
+	// How the value is normalised before it is hashed. Empty means
+	// "lowercase". See service.DefaultNormalization for why that is the
+	// default and "nik" is not.
+	Normalization string `json:"normalization"`
 }
 
 type blindIndexResponse struct {
 	Index string `json:"index"`
 	KID   string `json:"kid"`
+
+	// The mode actually applied, echoed back so a caller can confirm both
+	// sides of a comparison agree rather than assume it. The failure this
+	// guards against produces no error at all.
+	Normalization string `json:"normalization"`
 }
 
 func (s *Server) handleBlindIndex(w http.ResponseWriter, r *http.Request) {
@@ -333,13 +343,17 @@ func (s *Server) handleBlindIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	index, err := s.svc.BlindIndex(req.Value, req.KID)
+	index, err := s.svc.BlindIndex(req.Value, req.KID, req.Normalization)
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, blindIndexResponse{Index: index, KID: req.KID})
+	s.writeJSON(w, http.StatusOK, blindIndexResponse{
+		Index:         index,
+		KID:           req.KID,
+		Normalization: service.CanonicalNormalization(req.Normalization),
+	})
 }
 
 type versionResponse struct {

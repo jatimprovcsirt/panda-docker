@@ -443,9 +443,28 @@ func (x *MaskResponse) GetValue() string {
 }
 
 type BlindIndexRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Value         string                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
-	Kid           string                 `protobuf:"bytes,2,opt,name=kid,proto3" json:"kid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Value string                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	Kid   string                 `protobuf:"bytes,2,opt,name=kid,proto3" json:"kid,omitempty"`
+	// How the value is normalised before it is hashed.
+	//
+	// The caller chooses this, because the caller is the one who knows what the
+	// other end of the comparison does. Two systems that normalise differently
+	// produce different indexes for the same value and then never match — and
+	// they fail silently, because an index that matches nothing looks exactly
+	// like a record that is not there.
+	//
+	// Empty means "lowercase", matching the SDKs' default.
+	//
+	// Accepted: lowercase (or email), nik (or digits, phone), trim, none (or
+	// raw). An unrecognised mode is refused rather than quietly treated as
+	// "none", which is what the SDK does on its own.
+	//
+	// "nik" strips everything that is not a digit. Correct for a NIK written
+	// with separators, and wrong for anything else: an email or a name
+	// normalises to the empty string, and every value that does shares a single
+	// index. It has to be asked for.
+	Normalization string `protobuf:"bytes,3,opt,name=normalization,proto3" json:"normalization,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -494,10 +513,20 @@ func (x *BlindIndexRequest) GetKid() string {
 	return ""
 }
 
+func (x *BlindIndexRequest) GetNormalization() string {
+	if x != nil {
+		return x.Normalization
+	}
+	return ""
+}
+
 type BlindIndexResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         string                 `protobuf:"bytes,1,opt,name=index,proto3" json:"index,omitempty"`
-	Kid           string                 `protobuf:"bytes,2,opt,name=kid,proto3" json:"kid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Index string                 `protobuf:"bytes,1,opt,name=index,proto3" json:"index,omitempty"`
+	Kid   string                 `protobuf:"bytes,2,opt,name=kid,proto3" json:"kid,omitempty"`
+	// The mode actually applied. Returned so a caller can confirm the two sides
+	// agree rather than assume it — the failure this prevents is silent.
+	Normalization string `protobuf:"bytes,3,opt,name=normalization,proto3" json:"normalization,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -542,6 +571,13 @@ func (x *BlindIndexResponse) GetIndex() string {
 func (x *BlindIndexResponse) GetKid() string {
 	if x != nil {
 		return x.Kid
+	}
+	return ""
+}
+
+func (x *BlindIndexResponse) GetNormalization() string {
+	if x != nil {
+		return x.Normalization
 	}
 	return ""
 }
@@ -713,13 +749,15 @@ const file_panda_v1_panda_proto_rawDesc = "" +
 	"\vMaskRequest\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\"$\n" +
 	"\fMaskResponse\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\tR\x05value\";\n" +
+	"\x05value\x18\x01 \x01(\tR\x05value\"a\n" +
 	"\x11BlindIndexRequest\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\x12\x10\n" +
-	"\x03kid\x18\x02 \x01(\tR\x03kid\"<\n" +
+	"\x03kid\x18\x02 \x01(\tR\x03kid\x12$\n" +
+	"\rnormalization\x18\x03 \x01(\tR\rnormalization\"b\n" +
 	"\x12BlindIndexResponse\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\tR\x05index\x12\x10\n" +
-	"\x03kid\x18\x02 \x01(\tR\x03kid\"\x10\n" +
+	"\x03kid\x18\x02 \x01(\tR\x03kid\x12$\n" +
+	"\rnormalization\x18\x03 \x01(\tR\rnormalization\"\x10\n" +
 	"\x0eVersionRequest\"=\n" +
 	"\x0fVersionResponse\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x10\n" +

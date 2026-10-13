@@ -336,6 +336,36 @@ paths:
                 kid:
                   type: string
                   description: Key identifier, for grouping indexes by key.
+                normalization:
+                  type: string
+                  enum: [lowercase, nik, trim, none]
+                  default: lowercase
+                  description: |
+                    How the value is normalised before it is hashed.
+
+                    **Choose this to match whatever computes the other side of
+                    the comparison.** The index is only useful if both systems
+                    normalise the same way; two that differ produce different
+                    indexes for the same value and then never match, without
+                    any error — an index that finds nothing looks exactly like
+                    a record that is not there.
+
+                    | Mode | Effect | For |
+                    |---|---|---|
+                    | `lowercase` | trims, lowercases | email, names — the default |
+                    | `nik` | strips everything that is not a digit | NIK and phone numbers written with separators |
+                    | `trim` | trims only | free text |
+                    | `none` | as-is | values already canonical |
+
+                    The default is `lowercase`, matching the SDKs, and that
+                    matters for more than consistency: `lowercase` cannot empty
+                    a value, while `nik` can. A name or an email under `nik`
+                    normalises to the empty string, and every such value then
+                    shares a single index.
+
+                    The aliases the SDKs accept — `email`, `digits`, `phone`,
+                    `raw` — are accepted here too, and the response names the
+                    mode they resolve to.
       responses:
         "200":
           description: The index.
@@ -359,7 +389,33 @@ paths:
                       it was, and an application that validated the format
                       accordingly would have rejected every valid index.
                   kid: { type: string }
-        "400": { $ref: "#/components/responses/BadRequest" }
+                  normalization:
+                    type: string
+                    description: |
+                      The mode that was actually applied — the canonical name,
+                      so a request for `phone` comes back as `nik`.
+
+                      Returned so you can confirm both sides of a lookup agree
+                      rather than assume it. Log it beside the index you store:
+                      when a search stops finding records, this is the first
+                      thing worth comparing.
+        "400":
+          description: |
+            The request was rejected. Alongside the codes below, this endpoint
+            returns `invalid_normalization` when `normalization` is not one of
+            the accepted modes.
+
+            That is refused rather than ignored on purpose. The SDKs fall back
+            to the raw value for a mode they do not recognise, so a typo would
+            otherwise disable normalisation without saying anything — and the
+            index would look perfectly valid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: invalid_normalization
+                  message: '"nikc" is not a normalisation mode this service recognises; use one of lowercase, nik, trim, none'
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -437,6 +493,7 @@ components:
                 - rate_limited
                 - key_provider_unavailable
                 - shred_disabled
+                - invalid_normalization
                 - internal
             message:
               type: string

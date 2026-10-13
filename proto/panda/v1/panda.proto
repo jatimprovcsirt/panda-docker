@@ -98,11 +98,35 @@ message MaskResponse {
 message BlindIndexRequest {
   string value = 1;
   string kid = 2;
+
+  // How the value is normalised before it is hashed.
+  //
+  // The caller chooses this, because the caller is the one who knows what the
+  // other end of the comparison does. Two systems that normalise differently
+  // produce different indexes for the same value and then never match — and
+  // they fail silently, because an index that matches nothing looks exactly
+  // like a record that is not there.
+  //
+  // Empty means "lowercase", matching the SDKs' default.
+  //
+  // Accepted: lowercase (or email), nik (or digits, phone), trim, none (or
+  // raw). An unrecognised mode is refused rather than quietly treated as
+  // "none", which is what the SDK does on its own.
+  //
+  // "nik" strips everything that is not a digit. Correct for a NIK written
+  // with separators, and wrong for anything else: an email or a name
+  // normalises to the empty string, and every value that does shares a single
+  // index. It has to be asked for.
+  string normalization = 3;
 }
 
 message BlindIndexResponse {
   string index = 1;
   string kid = 2;
+
+  // The mode actually applied. Returned so a caller can confirm the two sides
+  // agree rather than assume it — the failure this prevents is silent.
+  string normalization = 3;
 }
 
 message VersionRequest {}

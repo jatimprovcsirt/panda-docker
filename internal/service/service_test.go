@@ -286,11 +286,11 @@ func TestAuditRecordsCarryNoPlaintext(t *testing.T) {
 func TestBlindIndexIsDeterministicAndKeyDependent(t *testing.T) {
 	svc, _, _ := newTestService(t)
 
-	a, err := svc.BlindIndex("3201012501990001", "testkey")
+	a, err := svc.BlindIndex("3201012501990001", "testkey", "")
 	if err != nil {
 		t.Fatalf("BlindIndex: %v", err)
 	}
-	b, _ := svc.BlindIndex("3201012501990001", "testkey")
+	b, _ := svc.BlindIndex("3201012501990001", "testkey", "")
 	if a != b {
 		t.Fatal("the same value produced two different indexes")
 	}
@@ -299,16 +299,105 @@ func TestBlindIndexIsDeterministicAndKeyDependent(t *testing.T) {
 		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
 		IndexKey: []byte("a-completely-different-index-key!!"),
 	})
-	c, _ := other.BlindIndex("3201012501990001", "testkey")
+	c, _ := other.BlindIndex("3201012501990001", "testkey", "")
 	if a == c {
 		t.Fatal("two different index keys produced the same index")
+	}
+}
+
+// TestDefaultNormalizationDoesNotCollapseValues is the regression test for a
+// defect this endpoint shipped with.
+//
+// The mode used to be fixed to "nik", which strips everything that is not a
+// digit. Any non-numeric value therefore normalised to the empty string, and
+// every such value produced the same index: an email, a name, a place of
+// birth all became one value. Lookup returned whatever shared that index, and
+// nothing reported an error.
+func TestDefaultNormalizationDoesNotCollapseValues(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	values := []string{
+		"budi@example.com",
+		"siti@example.com",
+		"Budi Santoso",
+		"Siti Rahayu",
+	}
+
+	seen := make(map[string]string, len(values))
+	for _, v := range values {
+		index, err := svc.BlindIndex(v, "testkey", "")
+		if err != nil {
+			t.Fatalf("BlindIndex(%q): %v", v, err)
+		}
+		if prev, ok := seen[index]; ok {
+			t.Errorf("%q and %q share an index — distinct values must not", prev, v)
+		}
+		seen[index] = v
+	}
+}
+
+// TestNIKNormalizationStillAvailable pins the behaviour that motivated the
+// default: a NIK written with separators is still indexed by its digits, so
+// long as the caller asks for it.
+func TestNIKNormalizationStillAvailable(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	written, err := svc.BlindIndex("3201-0125-0199-0001", "testkey", NormalizationNIK)
+	if err != nil {
+		t.Fatalf("BlindIndex: %v", err)
+	}
+	plain, _ := svc.BlindIndex("3201012501990001", "testkey", NormalizationNIK)
+	if written != plain {
+		t.Error("a NIK written with separators did not index to the same value as its digits")
+	}
+
+	// The default must not strip them, or the two modes would be
+	// indistinguishable and this would be testing nothing.
+	byDefault, _ := svc.BlindIndex("3201-0125-0199-0001", "testkey", "")
+	if byDefault == plain {
+		t.Error("the default normalisation stripped separators, which is the NIK rule")
+	}
+}
+
+// TestUnknownNormalizationIsRefused — the SDK falls back to the raw value for
+// a mode it does not know, so a typo would disable normalisation without
+// saying so. Refusing is the only way the caller finds out.
+func TestUnknownNormalizationIsRefused(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	_, err := svc.BlindIndex("3201012501990001", "testkey", "nikc")
+	if err == nil {
+		t.Fatal("an unknown normalisation mode was accepted")
+	}
+	if code := apierr.CodeOf(err); code != apierr.CodeInvalidNormalization {
+		t.Errorf("code = %q, want %q", code, apierr.CodeInvalidNormalization)
+	}
+}
+
+// TestNormalizationAliasesResolveToCanonicalNames — a caller who asks for
+// "phone" should be told the index was computed with "nik", not handed a
+// synonym and left to work out that they are the same rule.
+func TestNormalizationAliasesResolveToCanonicalNames(t *testing.T) {
+	cases := map[string]string{
+		"":        NormalizationLowercase,
+		"email":   NormalizationLowercase,
+		"phone":   NormalizationNIK,
+		"digits":  NormalizationNIK,
+		"raw":     NormalizationNone,
+		"NIK":     NormalizationNIK,
+		"   trim": NormalizationTrim,
+	}
+	for in, want := range cases {
+		if got := CanonicalNormalization(in); got != want {
+			t.Errorf("CanonicalNormalization(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
 func TestBlindIndexWithoutKeyFails(t *testing.T) {
 	svc, _ := mustServiceWithoutIndexKey(t)
 
-	_, err := svc.BlindIndex("3201012501990001", "testkey")
+	_, err := svc.BlindIndex("3201012501990001", "testkey", "")
 	if err == nil {
 		t.Fatal("a blind index was computed with no index key configured")
 	}

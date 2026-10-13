@@ -33,6 +33,7 @@ const (
 	CodeRateLimited            Code = "rate_limited"
 	CodeKeyProviderUnavailable Code = "key_provider_unavailable"
 	CodeShredDisabled          Code = "shred_disabled"
+	CodeInvalidNormalization   Code = "invalid_normalization"
 	CodeInternal               Code = "internal"
 )
 

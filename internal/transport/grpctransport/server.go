@@ -165,11 +165,18 @@ func (s *Server) BlindIndex(ctx context.Context, req *pandav1.BlindIndexRequest)
 		return nil, toStatus(apierr.New(apierr.CodeInvalidPlaintext, "value is empty"))
 	}
 
-	index, err := s.svc.BlindIndex(req.GetValue(), req.GetKid())
+	index, err := s.svc.BlindIndex(req.GetValue(), req.GetKid(), req.GetNormalization())
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &pandav1.BlindIndexResponse{Index: index, Kid: req.GetKid()}, nil
+	return &pandav1.BlindIndexResponse{
+		Index: index,
+		Kid:   req.GetKid(),
+		// Echoed back so a caller can confirm both sides of a comparison
+		// agree. A mismatch here produces no error anywhere — only lookups
+		// that return nothing.
+		Normalization: service.CanonicalNormalization(req.GetNormalization()),
+	}, nil
 }
 
 func (s *Server) Version(ctx context.Context, req *pandav1.VersionRequest) (*pandav1.VersionResponse, error) {

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 
 	"github.com/jatimprovcsirt/panda-go/blindindex"
 	"github.com/jatimprovcsirt/panda-go/crypto"
@@ -259,25 +260,101 @@ func (s *Service) Mask(value string) string {
 	return masking.Mask(value)
 }
 
+// Normalisation modes a caller may ask for.
+//
+// The SDK accepts these and falls back to the raw value for anything else.
+// That fallback is exactly why the list is held here as well: a caller who
+// mistypes a mode would otherwise get an index computed over input that was
+// never normalised, which matches nothing and reports no error.
+const (
+	NormalizationLowercase = "lowercase"
+	NormalizationNIK       = "nik"
+	NormalizationTrim      = "trim"
+	NormalizationNone      = "none"
+)
+
+// DefaultNormalization is what a caller gets when they do not choose.
+//
+// "lowercase" matches the SDKs, and it is the safe default for a reason: it
+// trims and lowercases, and it cannot empty a value. "nik" strips everything
+// that is not a digit, so an email or a name normalises to the empty string
+// and every such value shares a single index. A caller indexing NIKs written
+// with separators wants that mode; nobody should get it by accident.
+const DefaultNormalization = NormalizationLowercase
+
+// normalizationModes are the modes blindindex.Normalize acts on, aliases
+// included.
+var normalizationModes = map[string]bool{
+	"lowercase": true,
+	"email":     true,
+	"digits":    true,
+	"nik":       true,
+	"phone":     true,
+	"trim":      true,
+	"none":      true,
+	"raw":       true,
+}
+
+// KnownNormalization reports whether a mode is one the SDK will act on.
+func KnownNormalization(mode string) bool {
+	return normalizationModes[strings.ToLower(strings.TrimSpace(mode))]
+}
+
+// CanonicalNormalization resolves a mode, and its aliases, to one name.
+//
+// So a caller who asks for "phone" is told the index was computed with "nik",
+// rather than being handed back a synonym and left to work out that the two
+// are the same rule.
+func CanonicalNormalization(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "":
+		return DefaultNormalization
+	case "email":
+		return NormalizationLowercase
+	case "digits", "phone":
+		return NormalizationNIK
+	case "raw":
+		return NormalizationNone
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
 // BlindIndex computes the deterministic index used for exact-match lookup.
 //
 // Requires an index key. Without one this returns an error rather than a
 // weaker index: a blind index computed over a guessable key is not a blind
 // index, and a caller would have no way to tell the difference.
-func (s *Service) BlindIndex(value, kid string) (string, error) {
+//
+// The normalisation mode is the caller's to choose. This used to be fixed to
+// "nik" here, which meant the endpoint applied a NIK rule to whatever it was
+// given: an email or a name normalised to the empty string, so every such
+// value produced the same index and exact-match lookup returned nothing
+// useful. It also disagreed with the SDKs, whose default is "lowercase", so a
+// value indexed by an SDK and searched through this service never matched —
+// silently, because an index that matches nothing is indistinguishable from a
+// record that is not there.
+func (s *Service) BlindIndex(value, kid, normalization string) (string, error) {
 	if len(s.indexKey) == 0 {
 		return "", apierr.New(apierr.CodeInternal,
 			"no blind index key is configured; set the index key before using exact-match lookup")
 	}
-	return blindindex.Generate(value, s.indexKey, "nik"), nil
+
+	if normalization != "" && !KnownNormalization(normalization) {
+		return "", apierr.New(apierr.CodeInvalidNormalization,
+			fmt.Sprintf("%q is not a normalisation mode this service recognises; "+
+				"use one of lowercase, nik, trim, none", normalization))
+	}
+
+	return blindindex.Generate(value, s.indexKey, CanonicalNormalization(normalization)), nil
 }
 
 // NormaliseValue applies the SDK's normalisation without indexing.
 //
 // Exposed so a caller can see what the index was computed over — the usual
 // reason two systems' indexes disagree is that they normalised differently.
-func (s *Service) NormaliseValue(value string) string {
-	return blindindex.Normalize(value, "nik")
+func (s *Service) NormaliseValue(value, normalization string) string {
+	return blindindex.Normalize(value, CanonicalNormalization(normalization))
 }
 
 // Describe returns a one-line summary of what this service is running.
