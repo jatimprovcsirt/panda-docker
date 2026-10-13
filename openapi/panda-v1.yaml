@@ -80,7 +80,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [plaintext]
+              required: [plaintext, kid]
               properties:
                 plaintext:
                   type: string
@@ -89,10 +89,23 @@ paths:
                   examples: ["3201012501990001"]
                 kid:
                   type: string
+                  minLength: 1
                   description: |
-                    Key identifier. Omit to use the deployment's default key.
-                    Naming a key explicitly is what makes rotation possible
-                    later without re-encrypting everything.
+                    Key identifier, naming a key this deployment holds.
+                    Required — there is no default.
+
+                    An earlier version of this document said the field could
+                    be omitted in favour of a default key. No implementation
+                    has ever behaved that way: every SDK takes `kid` as a
+                    required argument, and the key provider resolves a key
+                    only from the identifier it is given. `PANDA_DEFAULT_KID`
+                    records which key a deployment was initialised around —
+                    the one `panda init` generated and the one the readiness
+                    probe checks — and is not consulted when encrypting.
+
+                    Naming the key is also what makes rotation possible later
+                    without re-encrypting everything, so it is worth being
+                    deliberate about which one you pass.
                   examples: ["opd-dukcapil-key-1"]
       responses:
         "200":
