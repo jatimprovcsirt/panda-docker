@@ -47,7 +47,7 @@ func newTestService(t *testing.T) (*Service, *recordingSink, string) {
 
 	sink := &recordingSink{}
 	svc, err := New(Options{
-		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
+		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil),
 		Audit:    sink,
 		IndexKey: []byte("index-key-for-tests-only-32-bytes"),
 	})
@@ -296,7 +296,7 @@ func TestBlindIndexIsDeterministicAndKeyDependent(t *testing.T) {
 	}
 
 	other, _ := New(Options{
-		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
+		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil),
 		IndexKey: []byte("a-completely-different-index-key!!"),
 	})
 	c, _ := other.BlindIndex("3201012501990001", "testkey", "")
@@ -415,7 +415,7 @@ func mustServiceWithoutIndexKey(t *testing.T) (*Service, *recordingSink) {
 
 	sink := &recordingSink{}
 	svc, err := New(Options{
-		Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
+		Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil),
 		Audit:  sink,
 	})
 	if err != nil {
@@ -436,7 +436,7 @@ func TestNilAuditSinkIsTolerated(t *testing.T) {
 	key := make([]byte, 32)
 	t.Setenv("PANDA_KEY_testkey", base64.StdEncoding.EncodeToString(key))
 
-	svc, err := New(Options{Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil)})
+	svc, err := New(Options{Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

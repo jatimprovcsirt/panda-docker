@@ -36,7 +36,7 @@ func newMetricFixture(t *testing.T, rateLimit int) *metricFixture {
 	t.Setenv("PANDA_DEFAULT_KID", testKID)
 
 	svc, err := service.New(service.Options{
-		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
+		Cipher:   crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil),
 		IndexKey: []byte("an-index-key-for-tests-only-32b!!"),
 	})
 	if err != nil {

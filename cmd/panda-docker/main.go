@@ -75,7 +75,7 @@ func run() int {
 	}
 
 	svc, err := service.New(service.Options{
-		Cipher:   crypto.NewFieldCipher(provider, nil, nil),
+		Cipher:   crypto.NewFieldCipher(provider, nil),
 		Audit:    auditSinkFor(cfg, log),
 		IndexKey: indexKeyFromEnv(),
 	})

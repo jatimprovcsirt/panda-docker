@@ -100,7 +100,7 @@ func newService(t *testing.T) *service.Service {
 	}
 
 	svc, err := service.New(service.Options{
-		Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil, nil),
+		Cipher: crypto.NewFieldCipher(crypto.NewLocalKeyProvider(), nil),
 	})
 	if err != nil {
 		t.Fatalf("service.New: %v", err)

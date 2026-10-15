@@ -3,7 +3,7 @@ module github.com/jatimprovcsirt/panda-docker
 go 1.26.0
 
 require (
-	github.com/jatimprovcsirt/panda-go v0.5.0
+	github.com/jatimprovcsirt/panda-go v0.5.4
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
