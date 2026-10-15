@@ -35,6 +35,7 @@ Before tagging:
 
 | Version | Date | Digest | What it was |
 |---|---|---|---|
+| `v0.1.2` | 2026-10-15 | — | Follows panda-go to v0.5.4, so this service reports its own use. That release is where telemetry stopped being a call per operation and became a counter; because the counting lives inside the cipher rather than at each call site, moving the pin is the whole change and `internal/service` is untouched. What is collected is pinned in `panda-spec/telemetry-format.md` — three counters and the SDK version, on a window boundary, and no plaintext, ciphertext, key material or field values. **It reports nothing until it has a token**: the SDK reads `.panda/credentials` or `PANDA_PORTAL_TOKEN`, and a container has neither unless one is mounted or set. The constructor lost a parameter, so the call and seven test files drop an extra `nil`. |
 | `v0.1.1` | 2026-10-13 | `sha256:220cb41d7642b770035511dc520f5c9b53c1dc0768166db747cbad1ffc14b9d9` | Blind index normalisation: the mode is now the caller's to choose, the default is `lowercase`, and an unrecognised mode is refused. Corrections to two things the OpenAPI document stated that were not true. Adds the Postman collection as a release asset. |
 | `v0.1.0` | 2026-10-12 | `sha256:0588625ba4b81ee6e656abf04a0800b548ac331e3bc6e6221af7af5790acdde8` | First release. REST and gRPC, linux/amd64 and linux/arm64, build provenance and SBOM attested. |
 
