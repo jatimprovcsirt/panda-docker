@@ -12,7 +12,7 @@ import (
 // Limiter is a token bucket per key.
 //
 // Per credential rather than global: a single noisy application should not
-// exhaust the budget for every other agency sharing the service, and a global
+// exhaust the budget for every other organization sharing the service, and a global
 // limit gives an attacker a trivial way to deny service to everyone else.
 type Limiter struct {
 	mu      sync.Mutex

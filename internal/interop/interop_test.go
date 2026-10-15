@@ -167,7 +167,7 @@ func phpString(s string) string {
 // --- the tests ------------------------------------------------------------
 
 // TestServiceCiphertextIsReadableByTheSDKs is the direction that matters most:
-// an agency migrating an application onto this service must be able to keep
+// an organization migrating an application onto this service must be able to keep
 // reading the data it already has.
 func TestServiceCiphertextIsReadableByTheSDKs(t *testing.T) {
 	svc := newService(t)
@@ -222,7 +222,7 @@ func TestServiceCiphertextIsReadableByTheSDKs(t *testing.T) {
 	})
 }
 
-// TestServiceReadsSDKCiphertext is the other direction, and the one an agency
+// TestServiceReadsSDKCiphertext is the other direction, and the one an organization
 // hits when an existing application keeps producing envelopes after this
 // service is introduced.
 func TestServiceReadsSDKCiphertext(t *testing.T) {
