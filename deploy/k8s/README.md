@@ -99,7 +99,7 @@ cannot reach the service — which is the intended default, and the reason an
 unlabelled application sees a connection timeout rather than a 401.
 
 ```bash
-kubectl label namespace opd-dukcapil panda.jatimprov.go.id/client=true
+kubectl label namespace panda-client panda.jatimprov.go.id/client=true
 ```
 
 ## Verifying the policy actually applies

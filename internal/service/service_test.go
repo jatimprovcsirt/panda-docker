@@ -223,7 +223,7 @@ func TestAuditRecordsTheActorAndOutcome(t *testing.T) {
 	svc, sink, kid := newTestService(t)
 
 	result, _ := svc.Encrypt("3201012501990001", kid)
-	actor := Actor{ClientCN: "opd-app", APIKeyID: "svc-1", SourceIP: "10.0.0.5", RequestID: "req-1"}
+	actor := Actor{ClientCN: "example-app", APIKeyID: "svc-1", SourceIP: "10.0.0.5", RequestID: "req-1"}
 
 	if _, err := svc.DecryptRaw(actor, result.Envelope); err != nil {
 		t.Fatalf("DecryptRaw: %v", err)
@@ -234,7 +234,7 @@ func TestAuditRecordsTheActorAndOutcome(t *testing.T) {
 		t.Fatalf("got %d audit records, want 1", len(records))
 	}
 	got := records[0]
-	if got.Actor.ClientCN != "opd-app" || got.Actor.APIKeyID != "svc-1" {
+	if got.Actor.ClientCN != "example-app" || got.Actor.APIKeyID != "svc-1" {
 		t.Errorf("actor not recorded: %+v", got.Actor)
 	}
 	if got.Outcome != "success" || got.KID != kid {

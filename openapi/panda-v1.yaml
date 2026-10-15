@@ -106,7 +106,7 @@ paths:
                     Naming the key is also what makes rotation possible later
                     without re-encrypting everything, so it is worth being
                     deliberate about which one you pass.
-                  examples: ["opd-dukcapil-key-1"]
+                  examples: ["nik-key-1"]
       responses:
         "200":
           description: The envelope.
@@ -126,8 +126,8 @@ paths:
                     description: Envelope format version.
                     const: 1
               example:
-                envelope: '{"v":1,"alg":"aes-256-gcm","kid":"opd-dukcapil-key-1","nonce":"...","ciphertext":"..."}'
-                kid: opd-dukcapil-key-1
+                envelope: '{"v":1,"alg":"aes-256-gcm","kid":"nik-key-1","nonce":"...","ciphertext":"..."}'
+                kid: nik-key-1
                 v: 1
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }

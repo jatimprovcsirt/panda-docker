@@ -3,7 +3,7 @@
 // One metric here matters more than the rest: `panda_unmask_total`, labelled
 // by API key. It is what makes anomalous bulk decryption visible. An
 // application that normally never calls the unmask path and suddenly starts
-// doing so in a loop is the signal an OPD security team needs, and without a
+// doing so in a loop is the signal a security team needs, and without a
 // per-key counter there is nothing to alert on.
 //
 // Cardinality is bounded deliberately. Labels are limited to values the

@@ -1,6 +1,6 @@
 # PANDA Docker — single-VM deployment.
 #
-# The shape here assumes the container is reachable from an OPD network and
+# The shape here assumes the container is reachable from a government network and
 # nothing else. It is not a public service: a network-reachable decryption
 # endpoint with weak credentials is a bulk plaintext exfiltration path, which
 # is why the API port is bound to loopback and TLS is mandatory in production.

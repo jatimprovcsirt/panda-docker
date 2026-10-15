@@ -193,7 +193,7 @@ func newAuth(t *testing.T, mode Mode) (*Authenticator, string) {
 		ID:       "reader",
 		Hash:     mustHash(t, token),
 		Scopes:   []string{"decrypt"},
-		ClientCN: "opd-app",
+		ClientCN: "example-app",
 	}})
 
 	a, err := NewAuthenticator(s, mode)
@@ -210,15 +210,15 @@ func TestMTLSAndAPIKeyRequireBoth(t *testing.T) {
 	if _, err := a.Authenticate(ctx, Credentials{Token: token}); err == nil {
 		t.Error("a valid key without a certificate authenticated")
 	}
-	if _, err := a.Authenticate(ctx, Credentials{ClientCert: certWithCN("opd-app")}); err == nil {
+	if _, err := a.Authenticate(ctx, Credentials{ClientCert: certWithCN("example-app")}); err == nil {
 		t.Error("a certificate without a key authenticated")
 	}
 
-	result, err := a.Authenticate(ctx, Credentials{Token: token, ClientCert: certWithCN("opd-app")})
+	result, err := a.Authenticate(ctx, Credentials{Token: token, ClientCert: certWithCN("example-app")})
 	if err != nil {
 		t.Fatalf("both credentials together were refused: %v", err)
 	}
-	if result.ClientCN != "opd-app" {
+	if result.ClientCN != "example-app" {
 		t.Errorf("client CN not recorded: %q", result.ClientCN)
 	}
 }

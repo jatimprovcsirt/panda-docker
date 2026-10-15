@@ -95,7 +95,7 @@ func TestUnknownCodeFallsBackTo500(t *testing.T) {
 func TestSDKMessagesAreNotPassedThrough(t *testing.T) {
 	// The SDK's own message could carry a KID, a path, or a provider's
 	// internals. Only the service's wording reaches a caller.
-	leaky := fmt.Errorf("%w: key path /etc/panda/keys/opd-dukcapil.pem not readable",
+	leaky := fmt.Errorf("%w: key path /etc/panda/keys/example.pem not readable",
 		crypto.ErrKeyNotFound)
 
 	msg := MessageOf(FromSDK(leaky))
